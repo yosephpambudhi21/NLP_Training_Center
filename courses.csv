@@ -1,0 +1,4 @@
+code,title,audience,format,duration_days,next_runs,location,price_idr,prereq,description
+JKK-SV-101,Jikotei Kanketsu for Supervisor,Supervisor / Section Head (Supplier & Internal),Offline,1.0,2025-11-17;2025-12-03,TLC Sunter 2 – Zenix 2,1850000,Dasar PDCA,"Prinsip JKK, PDCA, standard work audit, problem finding di lini produksi supplier."
+TCLASS-FOUND-201,TClass LMS Foundation,"Admin HRD Supplier, Training PIC",Online,0.5,2025-11-20;2025-12-10,Online (MS Teams),950000,-,"Pengantar TClass: membuat kelas, import peserta, tracking jam training, laporan compliance."
+QCC-LEAD-301,QCC Leadership & Facilitation,Team Leader / Champion QCC,Offline,1.0,2025-12-05,TLC Karawang,2250000,Basic Quality Tools,"Memandu tim QCC, fishbone, 7 tools, storytelling improvement, persiapan presentasi juri."
