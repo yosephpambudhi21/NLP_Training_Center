@@ -204,11 +204,59 @@ clf = Pipeline([
     ("svm", LinearSVC())
 ]).fit(X, y)
 
+INTENT_PROFILES = [
+    {"label":"catalog", "examples":["katalog","list program","apa saja kursusnya","training tersedia"], "description":"Permintaan daftar program/kursus"},
+    {"label":"schedule","examples":["jadwal","kapan kelas","batch berikut","tanggal training"], "description":"Menanyakan jadwal atau tanggal kelas"},
+    {"label":"pricing","examples":["harga","biaya","fee","tarif"], "description":"Menanyakan harga/biaya pelatihan"},
+    {"label":"registration","examples":["daftar","registrasi","enroll","ikut training"], "description":"Cara mendaftar atau permintaan pendaftaran"},
+    {"label":"custom","examples":["in-house","onsite","ke pabrik","private"], "description":"Meminta pelatihan khusus di lokasi peserta"},
+    {"label":"policy","examples":["batal","refund","pembayaran","invoice"], "description":"Kebijakan pembatalan atau cara bayar"},
+    {"label":"contact","examples":["hubungi","nomor wa","email","kontak"], "description":"Permintaan kontak"},
+    {"label":"about_tlc","examples":["apa itu tlc","tmm in","corporate university"], "description":"Menanyakan profil TLC"},
+    {"label":"program_focus","examples":["ada training safety","leadership ada","quality tools"], "description":"Menanyakan fokus/tema program"},
+    {"label":"trainer_info","examples":["siapa trainer","pengajar","instructor"], "description":"Menanyakan profil trainer"},
+    {"label":"certification","examples":["sertifikat","certificate","diakui"], "description":"Pertanyaan sertifikasi"},
+    {"label":"venue_facility","examples":["fasilitas","parkir","makan siang"], "description":"Fasilitas/venue"},
+    {"label":"support_vendor","examples":["PO","vendor onboarding","e-invoice"], "description":"Dukungan administrasi vendor"},
+    {"label":"faq_general","examples":["mulai jam berapa","durasi","berapa lama"], "description":"Pertanyaan umum jadwal/operasional"},
+]
+
+def build_intent_vectors():
+    labels, texts = [], []
+    for p in INTENT_PROFILES:
+        labels.append(p["label"])
+        texts.append(" ".join(p["examples"] + [p["description"]]))
+    vecs = embed_model.encode(texts, normalize_embeddings=True).astype("float32")
+    return dict(zip(labels, vecs))
+
+intent_vectors = build_intent_vectors()
+
+def semantic_intent(text:str):
+    qv = embed_model.encode([text], normalize_embeddings=True).astype("float32")[0]
+    best_label, best_score = None, -1.0
+    for label, vec in intent_vectors.items():
+        score = float(np.dot(qv, vec))
+        if score > best_score:
+            best_label, best_score = label, score
+    return best_label, best_score
+
 def detect_intent(text:str):
+    intent_clf, clf_conf = None, None
     try:
-        return clf.predict([text])[0]
+        margins = clf.decision_function([text])[0]
+        clf_conf = float(np.max(margins)) if hasattr(margins, "__len__") else float(margins)
+        intent_clf = clf.predict([text])[0]
     except Exception:
-        return "fallback"
+        pass
+
+    intent_sem, sem_score = semantic_intent(text)
+    intent = intent_clf
+    if clf_conf is None or clf_conf < 0.3:
+        intent = intent_sem
+    elif intent_sem and sem_score > 0.55 and clf_conf < 0.6:
+        intent = intent_sem
+
+    return intent or intent_sem or "fallback"
 
 # slots
 DATE_RX = re.compile(r"(20\d{2}-\d{2}-\d{2})|(\d{1,2}\s*(Nov|Dec|Jan|Feb|Mar|Apr|Mei|May|Jun|Jul|Aug|Sep|Okt|Oct)\s*20\d{2})", re.I)
@@ -333,10 +381,20 @@ def handle_faq_general():
 
 def handle_rag(text):
     results = rag_search(text, k=5)
-    tops = []
-    for sc, txt, m in results[:3]:
-        tops.append(f"• {txt}\n  (score={sc:.2f})")
-    return "Berikut yang paling relevan:\n" + "\n".join(tops)
+    tops = ["🔎 Saya temukan info relevan:"]
+    for sc, _, meta_info in results[:4]:
+        if meta_info["type"] == "course":
+            r = courses[courses.code == meta_info["code"]].iloc[0]
+            price = f"Rp{int(r.price_idr):,}".replace(",", ".")
+            tops.append(
+                f"• {r.code} – {r.title}: {r.format}, {r.duration_days} hari. "
+                f"Jadwal {r.next_runs} @ {r.location}. Harga {price}."
+            )
+        else:
+            faq_row = faqs.iloc[meta_info["id"]]
+            tops.append(f"• {faq_row.q} → {faq_row.a}")
+    tops.append("Kalimatmu belum spesifik? Sertakan kode kursus/tema atau jumlah peserta agar jawaban lebih tepat.")
+    return "\n".join(tops)
 
 # ---------- 7) Orchestrator ----------
 def respond(user_text):
