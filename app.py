@@ -24,7 +24,7 @@ import numpy as np
 from langdetect import detect
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVC
+from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
 from sentence_transformers import SentenceTransformer
 
@@ -35,6 +35,10 @@ CONTACT_EMAIL = "tlc@toyota.co.id"
 REG_FORM_URL = "https://forms.gle/your-form-id"  # ganti dengan form kamu
 WHATSAPP_LINK = "https://wa.me/6281234567890?text=Halo%20TLC%2C%20saya%20ingin%20daftar%20training"
 LOCATIONS = ["TLC Sunter 2 – Zenix 2", "TLC Karawang", "Online (MS Teams)", "On-site (Supplier)"]
+
+# Intent routing knobs — tweak to adjust how strict each layer is
+INTENT_CONFIDENCE_THRESHOLD = 0.5  # classifier must be at least this confident
+SEMANTIC_INTENT_THRESHOLD = 0.6    # semantic similarity must exceed this when classifier is uncertain
 
 # ---------- 3) Sample data (bisa ganti ke CSV internal) ----------
 courses = pd.DataFrame([
@@ -199,16 +203,82 @@ train = [
 ]
 X = [t[0] for t in train]
 y = [t[1] for t in train]
-clf = Pipeline([
+intent_clf = Pipeline([
     ("tfidf", TfidfVectorizer(ngram_range=(1,2), lowercase=True)),
-    ("svm", LinearSVC())
+    ("logreg", LogisticRegression(max_iter=1000))
 ]).fit(X, y)
 
+INTENT_PROFILES = [
+    {"label":"catalog", "examples":["katalog","list program","apa saja kursusnya","training tersedia"], "description":"Permintaan daftar program/kursus"},
+    {"label":"schedule","examples":["jadwal","kapan kelas","batch berikut","tanggal training"], "description":"Menanyakan jadwal atau tanggal kelas"},
+    {"label":"pricing","examples":["harga","biaya","fee","tarif"], "description":"Menanyakan harga/biaya pelatihan"},
+    {"label":"registration","examples":["daftar","registrasi","enroll","ikut training"], "description":"Cara mendaftar atau permintaan pendaftaran"},
+    {"label":"custom","examples":["in-house","onsite","ke pabrik","private"], "description":"Meminta pelatihan khusus di lokasi peserta"},
+    {"label":"policy","examples":["batal","refund","pembayaran","invoice"], "description":"Kebijakan pembatalan atau cara bayar"},
+    {"label":"contact","examples":["hubungi","nomor wa","email","kontak"], "description":"Permintaan kontak"},
+    {"label":"about_tlc","examples":["apa itu tlc","tmm in","corporate university"], "description":"Menanyakan profil TLC"},
+    {"label":"program_focus","examples":["ada training safety","leadership ada","quality tools"], "description":"Menanyakan fokus/tema program"},
+    {"label":"trainer_info","examples":["siapa trainer","pengajar","instructor"], "description":"Menanyakan profil trainer"},
+    {"label":"certification","examples":["sertifikat","certificate","diakui"], "description":"Pertanyaan sertifikasi"},
+    {"label":"venue_facility","examples":["fasilitas","parkir","makan siang"], "description":"Fasilitas/venue"},
+    {"label":"support_vendor","examples":["PO","vendor onboarding","e-invoice"], "description":"Dukungan administrasi vendor"},
+    {"label":"faq_general","examples":["mulai jam berapa","durasi","berapa lama"], "description":"Pertanyaan umum jadwal/operasional"},
+]
+
+def build_intent_vectors():
+    vectors = {}
+    for profile in INTENT_PROFILES:
+        seeds = profile["examples"] + [profile["description"]]
+        emb_matrix = embed_model.encode(seeds, normalize_embeddings=True).astype("float32")
+        avg_vec = np.mean(emb_matrix, axis=0)
+        norm = np.linalg.norm(avg_vec)
+        if norm:
+            avg_vec = (avg_vec / norm).astype("float32")
+        vectors[profile["label"]] = avg_vec
+    return vectors
+
+intent_vectors = build_intent_vectors()
+
+def semantic_intent(text:str):
+    qv = embed_model.encode([text], normalize_embeddings=True).astype("float32")[0]
+    best_label, best_score = None, -1.0
+    for label, vec in intent_vectors.items():
+        score = float(np.dot(qv, vec))
+        if score > best_score:
+            best_label, best_score = label, score
+    return best_label, best_score
+
 def detect_intent(text:str):
+    """Return (intent, debug_info) to expose routing internals for future tuning."""
+    debug = {
+        "clf_confidence": None,
+        "semantic_best_intent": None,
+        "semantic_similarity": None,
+    }
+    best_clf_intent, clf_conf = None, 0.0
     try:
-        return clf.predict([text])[0]
+        probs = intent_clf.predict_proba([text])[0]
+        classes = intent_clf.named_steps["logreg"].classes_
+        best_idx = int(np.argmax(probs))
+        best_clf_intent = classes[best_idx]
+        clf_conf = float(probs[best_idx])
+        debug["clf_confidence"] = clf_conf
     except Exception:
-        return "fallback"
+        pass
+
+    intent_sem, sem_score = semantic_intent(text)
+    debug["semantic_best_intent"] = intent_sem
+    debug["semantic_similarity"] = sem_score
+
+    if best_clf_intent and clf_conf >= INTENT_CONFIDENCE_THRESHOLD:
+        chosen = best_clf_intent
+    elif intent_sem and sem_score >= SEMANTIC_INTENT_THRESHOLD:
+        chosen = intent_sem
+    else:
+        chosen = None
+
+    debug["final_intent"] = chosen
+    return chosen, debug
 
 # slots
 DATE_RX = re.compile(r"(20\d{2}-\d{2}-\d{2})|(\d{1,2}\s*(Nov|Dec|Jan|Feb|Mar|Apr|Mei|May|Jun|Jul|Aug|Sep|Okt|Oct)\s*20\d{2})", re.I)
@@ -333,10 +403,20 @@ def handle_faq_general():
 
 def handle_rag(text):
     results = rag_search(text, k=5)
-    tops = []
-    for sc, txt, m in results[:3]:
-        tops.append(f"• {txt}\n  (score={sc:.2f})")
-    return "Berikut yang paling relevan:\n" + "\n".join(tops)
+    tops = ["🔎 Saya temukan info relevan:"]
+    for sc, _, meta_info in results[:4]:
+        if meta_info["type"] == "course":
+            r = courses[courses.code == meta_info["code"]].iloc[0]
+            price = f"Rp{int(r.price_idr):,}".replace(",", ".")
+            tops.append(
+                f"• {r.code} – {r.title}: {r.format}, {r.duration_days} hari. "
+                f"Jadwal {r.next_runs} @ {r.location}. Harga {price}."
+            )
+        else:
+            faq_row = faqs.iloc[meta_info["id"]]
+            tops.append(f"• {faq_row.q} → {faq_row.a}")
+    tops.append("Kalimatmu belum spesifik? Sertakan kode kursus/tema atau jumlah peserta agar jawaban lebih tepat.")
+    return "\n".join(tops)
 
 # ---------- 7) Orchestrator ----------
 def respond(user_text):
@@ -344,7 +424,7 @@ def respond(user_text):
     if not isinstance(user_text, str):
         user_text = "" if user_text is None else str(user_text)
 
-    intent = detect_intent(user_text)
+    intent, _debug = detect_intent(user_text)
 
     if intent == "catalog":        return handle_catalog()
     if intent == "schedule":       return handle_schedule(user_text)
