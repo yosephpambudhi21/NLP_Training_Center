@@ -24,7 +24,7 @@ import numpy as np
 from langdetect import detect
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVC
+from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
 from sentence_transformers import SentenceTransformer
 
@@ -35,6 +35,27 @@ CONTACT_EMAIL = "tlc@toyota.co.id"
 REG_FORM_URL = "https://forms.gle/your-form-id"  # ganti dengan form kamu
 WHATSAPP_LINK = "https://wa.me/6281234567890?text=Halo%20TLC%2C%20saya%20ingin%20daftar%20training"
 LOCATIONS = ["TLC Sunter 2 – Zenix 2", "TLC Karawang", "Online (MS Teams)", "On-site (Supplier)"]
+
+# Intent routing knobs — tweak to adjust how strict each layer is
+INTENT_CONFIDENCE_THRESHOLD = 0.5  # classifier must be at least this confident
+SEMANTIC_INTENT_THRESHOLD = 0.6    # semantic similarity must exceed this when classifier is uncertain
+
+# Conversational context helpers (keywords for lightweight rules)
+PRICING_KEYWORDS = ["harga", "biaya", "cost", "fee", "tarif"]
+EXTERNAL_KEYWORDS = [
+    "di luar pabrik",
+    "di luar plant",
+    "di luar site",
+    "diadakan di luar",
+    "in-house",
+    "in house",
+    "inhouse",
+    "onsite",
+    "on-site",
+    "di lokasi kami",
+    "bisa external",
+    "bisa diadakan di luar",
+]
 
 # ---------- 3) Sample data (bisa ganti ke CSV internal) ----------
 courses = pd.DataFrame([
@@ -86,6 +107,16 @@ faqs = pd.DataFrame([
      "a": "Pembatalan ≤ D-5: refund penuh; D-4 s.d D-2: 50%; D-1/no-show: tidak refund (dapat reschedule jika ada slot)."},
     {"q": "Bahasa yang didukung chatbot?",
      "a": "Bahasa Indonesia & Inggris."},
+    {"q": "Apakah TLC bisa in-house di lokasi perusahaan?",
+     "a": "Bisa, kami dapat mengadakan pelatihan on-site/in-house di pabrik atau kantor Anda sesuai jadwal yang disepakati."},
+    {"q": "Berapa minimal peserta untuk in-house training?",
+     "a": "Minimal kuota biasanya ±15 peserta (dapat disesuaikan). Mohon info estimasi peserta untuk proposal."},
+    {"q": "Bagaimana alur permintaan in-house training?",
+     "a": "Umumnya: kirim kebutuhan/topik & jumlah peserta → klarifikasi tujuan & profil peserta → proposal & jadwal → delivery."},
+    {"q": "Apa faktor yang mempengaruhi harga in-house training?",
+     "a": "Jumlah peserta, lokasi, materi/level kustomisasi, serta kebutuhan alat/praktik di lapangan."},
+    {"q": "Bisakah materi disesuaikan dengan proses perusahaan?",
+     "a": "Bisa. Kami dapat menyesuaikan studi kasus/contoh dengan proses dan isu di lini Anda."},
 ])
 
 courses.to_csv("courses.csv", index=False)
@@ -123,6 +154,26 @@ def rag_search(query, k=5):
         out.append((sim, docs[int(i)], meta[int(i)]))
     return out
 
+
+def summarize_rag_results(rag_results, limit=3):
+    """Return human-friendly bullet snippets for the top-k RAG hits."""
+    snippets = []
+    titles = []
+    for score, _, meta_info in rag_results[:limit]:
+        if meta_info["type"] == "course":
+            r = courses[courses.code == meta_info["code"]].iloc[0]
+            price = f"Rp{int(r.price_idr):,}".replace(",", ".")
+            snippets.append(
+                f"• {r.code} – {r.title}: {r.format}, {r.duration_days} hari. "
+                f"Jadwal {r.next_runs} @ {r.location}. Harga {price}."
+            )
+            titles.append(f"{r.code} – {r.title}")
+        else:
+            faq_row = faqs.iloc[meta_info["id"]]
+            snippets.append(f"• {faq_row.q} → {faq_row.a}")
+            titles.append(faq_row.q)
+    return snippets, titles
+
 # ---------- 5) Intent classifier (TLC extended) + slot extractor ----------
 train = [
     # Catalog
@@ -150,6 +201,13 @@ train = [
     ("Bisa training di lokasi supplier kami?", "custom"),
     ("Apakah bisa in-house training?", "custom"),
     ("Can you deliver on-site custom training?", "custom"),
+
+    # External / In-house request
+    ("Kami ingin mengajukan in-house training JKK", "external_training_request"),
+    ("Apakah TLC bisa datang ke pabrik kami untuk training?", "external_training_request"),
+    ("TLC bisa nggak adain pelatihan di kantor kami?", "external_training_request"),
+    ("We need an on-site training for our company", "external_training_request"),
+    ("Interested in in-house program for 25 pax", "external_training_request"),
 
     # Policy / payment
     ("Kebijakan pembatalan bagaimana?", "policy"),
@@ -199,32 +257,227 @@ train = [
 ]
 X = [t[0] for t in train]
 y = [t[1] for t in train]
-clf = Pipeline([
+intent_clf = Pipeline([
     ("tfidf", TfidfVectorizer(ngram_range=(1,2), lowercase=True)),
-    ("svm", LinearSVC())
+    ("logreg", LogisticRegression(max_iter=1000))
 ]).fit(X, y)
 
+INTENT_PROFILES = [
+    {"label": "catalog", "examples": ["katalog", "list program", "apa saja kursusnya", "training tersedia"], "description": "Permintaan daftar program/kursus"},
+    {"label": "schedule", "examples": ["jadwal", "kapan kelas", "batch berikut", "tanggal training"], "description": "Menanyakan jadwal atau tanggal kelas"},
+    {"label": "pricing", "examples": ["harga", "biaya", "fee", "tarif"], "description": "Menanyakan harga/biaya pelatihan"},
+    {"label": "registration", "examples": ["daftar", "registrasi", "enroll", "ikut training"], "description": "Cara mendaftar atau permintaan pendaftaran"},
+    {"label": "custom", "examples": ["in-house", "onsite", "ke pabrik", "private"], "description": "Meminta pelatihan khusus di lokasi peserta"},
+    {"label": "external_training_request", "examples": ["in-house training", "on-site di pabrik", "datang ke kantor kami", "inhouse untuk company", "request external training"], "description": "Permintaan training eksternal/in-house untuk perusahaan"},
+    {"label": "policy", "examples": ["batal", "refund", "pembayaran", "invoice"], "description": "Kebijakan pembatalan atau cara bayar"},
+    {"label": "contact", "examples": ["hubungi", "nomor wa", "email", "kontak"], "description": "Permintaan kontak"},
+    {"label": "about_tlc", "examples": ["apa itu tlc", "tmm in", "corporate university"], "description": "Menanyakan profil TLC"},
+    {"label": "program_focus", "examples": ["ada training safety", "leadership ada", "quality tools"], "description": "Menanyakan fokus/tema program"},
+    {"label": "trainer_info", "examples": ["siapa trainer", "pengajar", "instructor"], "description": "Menanyakan profil trainer"},
+    {"label": "certification", "examples": ["sertifikat", "certificate", "diakui"], "description": "Pertanyaan sertifikasi"},
+    {"label": "venue_facility", "examples": ["fasilitas", "parkir", "makan siang"], "description": "Fasilitas/venue"},
+    {"label": "support_vendor", "examples": ["PO", "vendor onboarding", "e-invoice"], "description": "Dukungan administrasi vendor"},
+    {"label": "faq_general", "examples": ["mulai jam berapa", "durasi", "berapa lama"], "description": "Pertanyaan umum jadwal/operasional"},
+]
+def build_intent_vectors():
+    vectors = {}
+    for profile in INTENT_PROFILES:
+        seeds = profile["examples"] + [profile["description"]]
+        emb_matrix = embed_model.encode(seeds, normalize_embeddings=True).astype("float32")
+        avg_vec = np.mean(emb_matrix, axis=0)
+        norm = np.linalg.norm(avg_vec)
+        if norm:
+            avg_vec = (avg_vec / norm).astype("float32")
+        vectors[profile["label"]] = avg_vec
+    return vectors
+
+intent_vectors = build_intent_vectors()
+
+def semantic_intent(text:str):
+    qv = embed_model.encode([text], normalize_embeddings=True).astype("float32")[0]
+    best_label, best_score = None, -1.0
+    for label, vec in intent_vectors.items():
+        score = float(np.dot(qv, vec))
+        if score > best_score:
+            best_label, best_score = label, score
+    return best_label, best_score
+
 def detect_intent(text:str):
+    """Return (intent, debug_info) to expose routing internals for future tuning."""
+    debug = {
+        "clf_confidence": None,
+        "semantic_best_intent": None,
+        "semantic_similarity": None,
+    }
+    best_clf_intent, clf_conf = None, 0.0
     try:
-        return clf.predict([text])[0]
+        probs = intent_clf.predict_proba([text])[0]
+        classes = intent_clf.named_steps["logreg"].classes_
+        best_idx = int(np.argmax(probs))
+        best_clf_intent = classes[best_idx]
+        clf_conf = float(probs[best_idx])
+        debug["clf_confidence"] = clf_conf
     except Exception:
-        return "fallback"
+        pass
+
+    intent_sem, sem_score = semantic_intent(text)
+    debug["semantic_best_intent"] = intent_sem
+    debug["semantic_similarity"] = sem_score
+
+    if best_clf_intent and clf_conf >= INTENT_CONFIDENCE_THRESHOLD:
+        chosen = best_clf_intent
+    elif intent_sem and sem_score >= SEMANTIC_INTENT_THRESHOLD:
+        chosen = intent_sem
+    else:
+        chosen = None
+
+    debug["final_intent"] = chosen
+    return chosen, debug
 
 # slots
 DATE_RX = re.compile(r"(20\d{2}-\d{2}-\d{2})|(\d{1,2}\s*(Nov|Dec|Jan|Feb|Mar|Apr|Mei|May|Jun|Jul|Aug|Sep|Okt|Oct)\s*20\d{2})", re.I)
 PAX_RX  = re.compile(r"(\d+)\s*(pax|orang|peserta|people)", re.I)
+BARE_PAX_RX = re.compile(r"^\s*(\d{1,3})\s*$")
 COURSE_RX = re.compile(r"(JKK[-\s]?\w+|TCLASS[-\s]?\w+|QCC[-\s]?\w+|XEV[-\s]?\w+|SAFETY[-\s]?\w+)", re.I)
 COMPANY_RX = re.compile(r"(PT\s+[A-Za-z0-9.&()\-\s]+)", re.I)
+LOCATION_RX = re.compile(
+    r"(karawang|sunter|jakarta|bandung|bekasi|cikarang|purwakarta|cibitung|cikande|depok|bogor|tangerang|semarang|surabaya|bali|yogyakarta|jogja|medan|makassar|batam|balikpapan|samarinda)",
+    re.I,
+)
 
 def extract_slots(text):
     slots = {}
     if not isinstance(text, str): 
         return slots
     m = PAX_RX.search(text);     slots["pax"]    = int(re.sub(r"\D","",m.group(1))) if m else None
+    if not slots.get("pax") and BARE_PAX_RX.match(text.strip()):
+        slots["pax"] = int(text.strip())
     m = COURSE_RX.search(text);  slots["course"] = m.group(0).upper().replace(" ","") if m else None
     m = DATE_RX.search(text);    slots["date"]   = m.group(0) if m else None
     m = COMPANY_RX.search(text); slots["company"]= m.group(0).strip() if m else None
+    m = LOCATION_RX.search(text); slots["location"] = m.group(0).title().strip() if m else None
     return {k:v for k,v in slots.items() if v}
+
+# ---------- 5b) Session state helpers ----------
+SESSION_STATE_TEMPLATE = {
+    "current_intent": None,
+    "current_course_code": None,
+    "current_course_title": None,
+    "participants": None,
+    "preferred_dates": None,
+    "company_name": None,
+    "location": None,
+    "mode": None,  # "internal" | "external"
+}
+
+def init_session_state():
+    return SESSION_STATE_TEMPLATE.copy()
+
+def ensure_session_state(state):
+    base = init_session_state()
+    if isinstance(state, dict):
+        for k in base:
+            if k in state and state[k] is not None:
+                base[k] = state[k]
+    return base
+
+def match_course_reference(text):
+    if not text:
+        return None
+    text_lower = text.lower()
+    slots = extract_slots(text)
+    if slots.get("course"):
+        code = slots["course"]
+        match = courses[courses.code.str.contains(code.split("-")[0], case=False, regex=False)]
+        if not match.empty:
+            row = match.iloc[0]
+            return {"code": row.code, "title": row.title}
+    # fallback: title keywords
+    for _, row in courses.iterrows():
+        if row.title.lower() in text_lower:
+            return {"code": row.code, "title": row.title}
+    return None
+
+def append_unique_date(state, date_str):
+    if not date_str:
+        return
+    if state.get("preferred_dates") is None:
+        state["preferred_dates"] = []
+    if date_str not in state["preferred_dates"]:
+        state["preferred_dates"].append(date_str)
+
+def apply_context_rules(text, intent, debug_info, state, slots):
+    """Lightweight heuristic rules to make turn-level intent selection context aware."""
+    normalized = text.lower()
+    clf_conf = debug_info.get("clf_confidence") or 0.0
+    low_conf = (intent is None) or (clf_conf < INTENT_CONFIDENCE_THRESHOLD)
+    chosen = intent
+
+    # Rule: if we recently discussed catalog/registration and pricing words appear, treat as pricing
+    if low_conf and state.get("current_intent") in {"catalog", "registration"}:
+        if any(word in normalized for word in PRICING_KEYWORDS):
+            chosen = "pricing"
+
+    # Rule: if user keeps talking about in-house/external and we already track that context, stay on it
+    if low_conf and state.get("current_intent") == "external_training_request":
+        if any(word in normalized for word in EXTERNAL_KEYWORDS):
+            chosen = "external_training_request"
+
+    # Rule: follow-up asking for in-house/external delivery keeps the course context
+    if any(word in normalized for word in EXTERNAL_KEYWORDS):
+        if state.get("current_course_code") or state.get("current_course_title") or slots.get("course"):
+            chosen = "external_training_request"
+            state["mode"] = "external"
+
+    # Rule: if user shares lokasi + course hint with low confidence, assume external request
+    if low_conf and (slots.get("location") or state.get("location")):
+        if state.get("current_course_code") or state.get("current_course_title") or slots.get("course"):
+            chosen = "external_training_request"
+            state["mode"] = state.get("mode") or "external"
+
+    # Rule: continuing registration/external flow with participant info should not drop the flow
+    if state.get("current_intent") in {"registration", "custom", "external_training_request"} and slots.get("pax"):
+        if chosen is None:
+            chosen = state.get("current_intent")
+
+    return chosen
+
+def update_state_from_slots(state, slots, course_match=None):
+    if not state:
+        return
+    if course_match:
+        state["current_course_code"] = course_match.get("code")
+        state["current_course_title"] = course_match.get("title")
+    elif slots.get("course"):
+        match = courses[courses.code.str.contains(slots["course"].split("-")[0], case=False, regex=False)]
+        if not match.empty:
+            row = match.iloc[0]
+            state["current_course_code"] = row.code
+            state["current_course_title"] = row.title
+    if slots.get("pax"):
+        state["participants"] = slots["pax"]
+    if slots.get("company"):
+        state["company_name"] = slots["company"]
+    if slots.get("location"):
+        state["location"] = slots["location"]
+    if slots.get("date"):
+        append_unique_date(state, slots["date"])
+
+
+def detect_missing_slots(slots, state):
+    """Check which key details are still missing for guidance prompts."""
+    missing = []
+    if not (slots.get("course") or state.get("current_course_code") or state.get("current_course_title")):
+        missing.append("course")
+    if not (slots.get("company") or state.get("company_name")):
+        missing.append("company_name")
+    if not (slots.get("pax") or state.get("participants")):
+        missing.append("participants")
+    if not (slots.get("location") or state.get("location")):
+        missing.append("location")
+    if not (slots.get("date") or (state.get("preferred_dates") and len(state.get("preferred_dates")) > 0)):
+        missing.append("preferred_dates")
+    return missing
 
 # ---------- 6) Handlers ----------
 def render_course_row(r):
@@ -235,10 +488,13 @@ def handle_catalog():
     rows = "\n".join(render_course_row(r) for _, r in courses.iterrows())
     return f"Berikut program yang tersedia:\n{rows}\n\nButuh brosur PDF atau kurasi untuk supplier tertentu? Ketik: *rekomendasi untuk supplier komponen stamping*."
 
-def handle_schedule(text):
-    slots = extract_slots(text)
-    if slots.get("course"):
-        c = courses[courses.code.str.contains(slots["course"].split("-")[0], case=False, regex=False)]
+def handle_schedule(text, session_state=None, slots=None):
+    slots = slots or extract_slots(text)
+    code_hint = slots.get("course")
+    if not code_hint and session_state:
+        code_hint = session_state.get("current_course_code")
+    if code_hint:
+        c = courses[courses.code.str.contains(code_hint.split("-")[0], case=False, regex=False)]
         if c.empty:
             c = courses[courses.title.str.contains("JKK|TClass|QCC", case=False, regex=True)]
     else:
@@ -248,42 +504,114 @@ def handle_schedule(text):
         msg.append(f"- {r.code}: {r.next_runs} @ {r.location}")
     return "\n".join(msg)
 
-def handle_pricing(text):
-    slots = extract_slots(text)
-    if slots.get("course"):
-        c = courses[courses.code.str.contains(slots["course"].split("-")[0], case=False)]
-        if c.empty: 
+
+def handle_pricing(text, session_state=None, slots=None):
+    slots = slots or extract_slots(text)
+    code_hint = slots.get("course")
+    if not code_hint and session_state:
+        code_hint = session_state.get("current_course_code")
+    if code_hint:
+        c = courses[courses.code.str.contains(code_hint.split("-")[0], case=False, regex=False)]
+        if c.empty:
             return "Mohon sebutkan kode atau judul pelatihan yang dimaksud (mis. JKK-SV-101)."
         r = c.iloc[0]
-        return f"Harga {r.code} – {r.title}: Rp{int(r.price_idr):,} per peserta."
+        note = ""
+        if session_state and session_state.get("participants"):
+            note = f" untuk {session_state['participants']} peserta"
+        return f"Harga {r.code} – {r.title}{note}: Rp{int(r.price_idr):,} per peserta."
+    if session_state and session_state.get("current_course_title"):
+        return (f"Untuk kursus {session_state['current_course_code']} – {session_state['current_course_title']}, "
+                "mohon konfirmasi jumlah peserta agar kami hitung ulang.")
     return "Harga per peserta tertera di katalog. Sebutkan kode/judul pelatihan untuk detail harga."
 
-def handle_registration(text):
-    slots = extract_slots(text)
-    pax = slots.get("pax","(jumlah peserta?)")
-    course = slots.get("course","(kode kursus?)")
-    comp = slots.get("company","(nama perusahaan?)")
+
+def handle_registration(text, session_state=None, slots=None):
+    slots = slots or extract_slots(text)
+    pax = slots.get("pax") or (session_state.get("participants") if session_state else None) or "(jumlah peserta?)"
+    course = slots.get("course") or (session_state.get("current_course_code") if session_state else None) or "(kode kursus?)"
+    comp = slots.get("company") or (session_state.get("company_name") if session_state else None) or "(nama perusahaan?)"
+    course_title = session_state.get("current_course_title") if session_state else None
+    course_line = f"• Kursus: {course}"
+    if course_title and course_title not in course:
+        course_line += f" – {course_title}"
     return textwrap.dedent(f"""
     Baik, saya siapkan pendaftaran:
     • Perusahaan: {comp}
-    • Kursus: {course}
+    {course_line}
     • Jumlah Peserta: {pax}
     • Tautan Registrasi: {REG_FORM_URL}
     • Bantuan WA: {WHATSAPP_LINK}
-    
+
     Jika ingin daftar via Google Sheet, kirimkan email ke {CONTACT_EMAIL} dengan subject: "REG {course} – {comp}" beserta data peserta (Nama, Email, No. HP).
     """).strip()
 
-def handle_custom(text):
-    slots = extract_slots(text)
-    comp = slots.get("company","(nama perusahaan?)")
+
+def handle_custom(text, session_state=None, slots=None):
+    slots = slots or extract_slots(text)
+    comp = slots.get("company") or (session_state.get("company_name") if session_state else None) or "(nama perusahaan?)"
+    course_desc = ""
+    if session_state and session_state.get("current_course_code"):
+        course_desc = f" Fokus kursus: {session_state['current_course_code']} – {(session_state.get('current_course_title') or '')}"
+    mode = session_state.get("mode") if session_state else None
+    mode_line = "Mode: external/in-house" if not mode else f"Mode: {mode.title()}"
     return textwrap.dedent(f"""
     In-house / on-site bisa 👍
-    • Skop: sesuaikan kebutuhan proses di lini {comp if comp!='(nama perusahaan?)' else 'supplier'} (audit standard work, PDCA, QCC, TClass admin, dsb.)
+    • Skop: sesuaikan kebutuhan proses di lini {comp if comp!='(nama perusahaan?)' else 'supplier'}{course_desc}
+    • {mode_line}
     • Lead time: 2–3 minggu dari konfirmasi
     • Minimal kuota: 15 peserta (nego)
     • Kirim kebutuhan (tujuan, profil peserta, tanggal target) ke {CONTACT_EMAIL} atau WA {WHATSAPP_LINK}.
     """).strip()
+
+
+def handle_external_training_request(text, session_state=None, slots=None):
+    """Respond to in-house/external training requests with slot echo + next questions."""
+    slots = slots or extract_slots(text)
+    state = ensure_session_state(session_state)
+    state["mode"] = state.get("mode") or "external"
+
+    course = slots.get("course") or state.get("current_course_code") or state.get("current_course_title") or "(kode/judul kursus?)"
+    course_title = state.get("current_course_title")
+    course_line = f"• Kursus/topik: {course}"
+    if course_title and course_title not in course:
+        course_line += f" – {course_title}"
+
+    company = slots.get("company") or state.get("company_name") or "(nama perusahaan?)"
+    pax = slots.get("pax") or state.get("participants") or "(jumlah peserta?)"
+    loc = slots.get("location") or state.get("location") or "(lokasi/kota?)"
+    dates = slots.get("date") or ", ".join(state.get("preferred_dates") or []) or "(waktu target?)"
+
+    missing = detect_missing_slots(slots, state)
+    followups = []
+    if "company_name" in missing:
+        followups.append("Nama perusahaan?")
+    if "participants" in missing:
+        followups.append("Estimasi jumlah peserta?")
+    if "location" in missing:
+        followups.append("Lokasi training (pabrik/kantor/hotel) dan kota?")
+    if "preferred_dates" in missing:
+        followups.append("Tanggal target atau bulan rencana?")
+    if "course" in missing:
+        followups.append("Topik atau kode kursus yang diinginkan?")
+
+    lines = [
+        "Siap, kami catat permintaan in-house / on-site training:",
+        f"• Perusahaan: {company}",
+        course_line,
+        f"• Perkiraan peserta: {pax}",
+        f"• Lokasi/area: {loc}",
+        f"• Waktu target: {dates}",
+        "",
+        "Materi bisa disesuaikan dengan proses dan studi kasus Anda.",
+    ]
+    if followups:
+        lines.append("Mohon info tambahan agar kami siapkan proposal:")
+        for q in followups:
+            lines.append(f"- {q}")
+    else:
+        lines.append(f"Tim TLC akan hubungi lewat email/WA yang Anda berikan ({CONTACT_EMAIL} / {WHATSAPP_LINK}).")
+
+    return "\n".join(lines)
 
 def handle_policy():
     hits = faqs[faqs.q.str.contains("pembatalan|kebijakan", case=False, regex=True)]
@@ -331,39 +659,102 @@ def handle_faq_general():
             "• Mode: Offline TLC/On-site, atau Online via MS Teams.\n"
             "• Minimal kuota in-house: ±15 peserta (nego).")
 
-def handle_rag(text):
-    results = rag_search(text, k=5)
-    tops = []
-    for sc, txt, m in results[:3]:
-        tops.append(f"• {txt}\n  (score={sc:.2f})")
-    return "Berikut yang paling relevan:\n" + "\n".join(tops)
+def generate_fallback_response(user_text, rag_results, detected_slots, missing_slots):
+    """RAG-driven fallback that also guides users to share missing details."""
+    snippets, titles = summarize_rag_results(rag_results, limit=3)
+    topic_hint = titles[0] if titles else "topik pelatihan"
+
+    followups = []
+    if "course" in missing_slots:
+        followups.append("Sebutkan kode atau judul pelatihan yang dimaksud?")
+    if "company_name" in missing_slots:
+        followups.append("Nama perusahaan Anda?")
+    if "participants" in missing_slots:
+        followups.append("Estimasi jumlah peserta?")
+    if "location" in missing_slots:
+        followups.append("Lokasi training yang diinginkan (pabrik/kantor/hotel dan kota)?")
+    if "preferred_dates" in missing_slots:
+        followups.append("Tanggal target atau bulan rencana training?")
+
+    header = f"Sepertinya terkait {topic_hint}." if topic_hint else "Berikut beberapa pilihan terkait:"
+    response_lines = [header]
+    if snippets:
+        response_lines.append("🔎 Info relevan:")
+        response_lines.extend(snippets)
+
+    if followups:
+        response_lines.append("Supaya saya bisa jawab lebih tepat, mohon bantu info:")
+        for q in followups[:3]:
+            response_lines.append(f"• {q}")
+    else:
+        response_lines.append("Ada detail lain yang perlu saya lengkapi?")
+
+    return "\n".join(response_lines)
 
 # ---------- 7) Orchestrator ----------
-def respond(user_text):
+def respond(user_text, session_state=None):
     # Normalisasi input
     if not isinstance(user_text, str):
         user_text = "" if user_text is None else str(user_text)
 
-    intent = detect_intent(user_text)
+    state = ensure_session_state(session_state)
+    intent, debug_info = detect_intent(user_text)
+    slots = extract_slots(user_text)
+    course_match = match_course_reference(user_text)
 
-    if intent == "catalog":        return handle_catalog()
-    if intent == "schedule":       return handle_schedule(user_text)
-    if intent == "pricing":        return handle_pricing(user_text)
-    if intent == "registration":   return handle_registration(user_text)
-    if intent == "custom":         return handle_custom(user_text)
-    if intent == "policy":         return handle_policy()
-    if intent == "contact":        return handle_contact()
-    if intent == "about_tlc":      return handle_about_tlc()
-    if intent == "program_focus":  return handle_program_focus()
-    if intent == "trainer_info":   return handle_trainer_info()
-    if intent == "certification":  return handle_certification()
-    if intent == "venue_facility": return handle_venue_facility()
-    if intent == "support_vendor": return handle_support_vendor()
-    if intent == "faq_general":    return handle_faq_general()
+    intent = apply_context_rules(user_text, intent, debug_info, state, slots)
+    update_state_from_slots(state, slots, course_match)
 
-    # fallback
-    out = handle_rag(user_text)
-    return out if isinstance(out, str) else str(out)
+    clf_conf = debug_info.get("clf_confidence") or 0.0
+    sem_conf = debug_info.get("semantic_similarity") or 0.0
+    low_conf_router = (clf_conf < INTENT_CONFIDENCE_THRESHOLD) and (sem_conf < SEMANTIC_INTENT_THRESHOLD)
+
+    if intent:
+        state["current_intent"] = intent
+        if intent == "external_training_request":
+            state["mode"] = state.get("mode") or "external"
+
+    fallback_needed = (intent is None) or (intent == "other") or low_conf_router
+
+    if not fallback_needed and intent == "catalog":
+        reply = handle_catalog()
+    elif not fallback_needed and intent == "schedule":
+        reply = handle_schedule(user_text, session_state=state, slots=slots)
+    elif not fallback_needed and intent == "pricing":
+        reply = handle_pricing(user_text, session_state=state, slots=slots)
+    elif not fallback_needed and intent == "registration":
+        reply = handle_registration(user_text, session_state=state, slots=slots)
+    elif not fallback_needed and intent == "external_training_request":
+        reply = handle_external_training_request(user_text, session_state=state, slots=slots)
+    elif not fallback_needed and intent == "custom":
+        reply = handle_custom(user_text, session_state=state, slots=slots)
+    elif not fallback_needed and intent == "policy":
+        reply = handle_policy()
+    elif not fallback_needed and intent == "contact":
+        reply = handle_contact()
+    elif not fallback_needed and intent == "about_tlc":
+        reply = handle_about_tlc()
+    elif not fallback_needed and intent == "program_focus":
+        reply = handle_program_focus()
+    elif not fallback_needed and intent == "trainer_info":
+        reply = handle_trainer_info()
+    elif not fallback_needed and intent == "certification":
+        reply = handle_certification()
+    elif not fallback_needed and intent == "venue_facility":
+        reply = handle_venue_facility()
+    elif not fallback_needed and intent == "support_vendor":
+        reply = handle_support_vendor()
+    elif not fallback_needed and intent == "faq_general":
+        reply = handle_faq_general()
+    else:
+        rag_results = rag_search(user_text, k=5)
+        detected_slots = slots.copy()
+        if course_match:
+            detected_slots["course_match"] = course_match
+        missing_slots = detect_missing_slots(slots, state)
+        reply = generate_fallback_response(user_text, rag_results, detected_slots, missing_slots)
+
+    return reply, state
 
 # ---------- 8) Leads logging ----------
 LEADS_CSV = "leads.csv"
@@ -385,11 +776,12 @@ quick_msgs = [
     "Harga TClass",
     "Daftar 10 pax untuk JKK-SV-101",
     "Bisa in-house di pabrik kami PT XYZ?",
+    "Minta proposal in-house 20 orang di Karawang",
     "Kebijakan pembatalan",
     "Kontak & lokasi"
 ]
 
-def chat_fn(history, message, name, company, email, phone, interest):
+def chat_fn(history, message, session_state, name, company, email, phone, interest):
     # Paksa ke string supaya tidak bikin error
     msg_text = "" if message is None else (message if isinstance(message, str) else str(message))
     name     = "" if not isinstance(name, str) else name
@@ -397,14 +789,16 @@ def chat_fn(history, message, name, company, email, phone, interest):
     email    = "" if not isinstance(email, str) else email
     phone    = "" if not isinstance(phone, str) else phone
     interest = "" if not isinstance(interest, str) else interest
+    state    = ensure_session_state(session_state)
 
     try:
-        reply = respond(msg_text)
+        reply, updated_state = respond(msg_text, session_state=state)
         if not isinstance(reply, str):
             reply = str(reply)
     except Exception as e:
         # Jangan biarkan exception menerus ke ASGI
         reply = f"Maaf, terjadi error di server: {e!s}"
+        updated_state = state
 
     # Logging leads: hanya kalau msg_text string dan bisa di-lower()
     try:
@@ -415,7 +809,7 @@ def chat_fn(history, message, name, company, email, phone, interest):
         pass  # jangan biarkan logging merusak chat
 
     history = (history or []) + [(msg_text, reply)]
-    return history, ""
+    return history, updated_state, ""
 
 with gr.Blocks(theme="soft") as demo:
     gr.Markdown(f"### 🤖 {ORG_NAME} — Training Assistant (Beta)\nDukungan: ID/EN • Timezone: {TZ}\n\n"
@@ -437,12 +831,12 @@ with gr.Blocks(theme="soft") as demo:
             msg = gr.Textbox(label="Ketik pertanyaan Anda…")
             send = gr.Button("Kirim", variant="primary")
 
-    state = gr.State([])
+    session_state = gr.State(init_session_state())
 
     qp_btn.click(lambda c: c or "Lihat katalog pelatihan", qp, msg)
-    send.click(chat_fn, inputs=[state, msg, name, company, email, phone, interest],
-               outputs=[chat, msg])
-    msg.submit(chat_fn, inputs=[state, msg, name, company, email, phone, interest],
-               outputs=[chat, msg])
+    send.click(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
+               outputs=[chat, session_state, msg])
+    msg.submit(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
+               outputs=[chat, session_state, msg])
 
 demo.launch(debug=False, share=True)
