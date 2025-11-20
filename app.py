@@ -24,7 +24,7 @@ import numpy as np
 from langdetect import detect
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVC
+from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
 from sentence_transformers import SentenceTransformer
 
@@ -35,6 +35,10 @@ CONTACT_EMAIL = "tlc@toyota.co.id"
 REG_FORM_URL = "https://forms.gle/your-form-id"  # ganti dengan form kamu
 WHATSAPP_LINK = "https://wa.me/6281234567890?text=Halo%20TLC%2C%20saya%20ingin%20daftar%20training"
 LOCATIONS = ["TLC Sunter 2 – Zenix 2", "TLC Karawang", "Online (MS Teams)", "On-site (Supplier)"]
+
+# Intent routing knobs — tweak to adjust how strict each layer is
+INTENT_CONFIDENCE_THRESHOLD = 0.5  # classifier must be at least this confident
+SEMANTIC_INTENT_THRESHOLD = 0.6    # semantic similarity must exceed this when classifier is uncertain
 
 # ---------- 3) Sample data (bisa ganti ke CSV internal) ----------
 courses = pd.DataFrame([
@@ -199,9 +203,9 @@ train = [
 ]
 X = [t[0] for t in train]
 y = [t[1] for t in train]
-clf = Pipeline([
+intent_clf = Pipeline([
     ("tfidf", TfidfVectorizer(ngram_range=(1,2), lowercase=True)),
-    ("svm", LinearSVC())
+    ("logreg", LogisticRegression(max_iter=1000))
 ]).fit(X, y)
 
 INTENT_PROFILES = [
@@ -222,12 +226,16 @@ INTENT_PROFILES = [
 ]
 
 def build_intent_vectors():
-    labels, texts = [], []
-    for p in INTENT_PROFILES:
-        labels.append(p["label"])
-        texts.append(" ".join(p["examples"] + [p["description"]]))
-    vecs = embed_model.encode(texts, normalize_embeddings=True).astype("float32")
-    return dict(zip(labels, vecs))
+    vectors = {}
+    for profile in INTENT_PROFILES:
+        seeds = profile["examples"] + [profile["description"]]
+        emb_matrix = embed_model.encode(seeds, normalize_embeddings=True).astype("float32")
+        avg_vec = np.mean(emb_matrix, axis=0)
+        norm = np.linalg.norm(avg_vec)
+        if norm:
+            avg_vec = (avg_vec / norm).astype("float32")
+        vectors[profile["label"]] = avg_vec
+    return vectors
 
 intent_vectors = build_intent_vectors()
 
@@ -241,22 +249,36 @@ def semantic_intent(text:str):
     return best_label, best_score
 
 def detect_intent(text:str):
-    intent_clf, clf_conf = None, None
+    """Return (intent, debug_info) to expose routing internals for future tuning."""
+    debug = {
+        "clf_confidence": None,
+        "semantic_best_intent": None,
+        "semantic_similarity": None,
+    }
+    best_clf_intent, clf_conf = None, 0.0
     try:
-        margins = clf.decision_function([text])[0]
-        clf_conf = float(np.max(margins)) if hasattr(margins, "__len__") else float(margins)
-        intent_clf = clf.predict([text])[0]
+        probs = intent_clf.predict_proba([text])[0]
+        classes = intent_clf.named_steps["logreg"].classes_
+        best_idx = int(np.argmax(probs))
+        best_clf_intent = classes[best_idx]
+        clf_conf = float(probs[best_idx])
+        debug["clf_confidence"] = clf_conf
     except Exception:
         pass
 
     intent_sem, sem_score = semantic_intent(text)
-    intent = intent_clf
-    if clf_conf is None or clf_conf < 0.3:
-        intent = intent_sem
-    elif intent_sem and sem_score > 0.55 and clf_conf < 0.6:
-        intent = intent_sem
+    debug["semantic_best_intent"] = intent_sem
+    debug["semantic_similarity"] = sem_score
 
-    return intent or intent_sem or "fallback"
+    if best_clf_intent and clf_conf >= INTENT_CONFIDENCE_THRESHOLD:
+        chosen = best_clf_intent
+    elif intent_sem and sem_score >= SEMANTIC_INTENT_THRESHOLD:
+        chosen = intent_sem
+    else:
+        chosen = None
+
+    debug["final_intent"] = chosen
+    return chosen, debug
 
 # slots
 DATE_RX = re.compile(r"(20\d{2}-\d{2}-\d{2})|(\d{1,2}\s*(Nov|Dec|Jan|Feb|Mar|Apr|Mei|May|Jun|Jul|Aug|Sep|Okt|Oct)\s*20\d{2})", re.I)
@@ -402,7 +424,7 @@ def respond(user_text):
     if not isinstance(user_text, str):
         user_text = "" if user_text is None else str(user_text)
 
-    intent = detect_intent(user_text)
+    intent, _debug = detect_intent(user_text)
 
     if intent == "catalog":        return handle_catalog()
     if intent == "schedule":       return handle_schedule(user_text)

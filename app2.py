@@ -8,7 +8,7 @@ import gradio as gr
 import pandas as pd
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVC
+from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
 from sentence_transformers import SentenceTransformer
 
@@ -45,6 +45,10 @@ CONTACT_EMAIL = "tlc@toyota.co.id"
 REG_FORM_URL = "https://forms.gle/your-form-id"   # ganti sesuai form kamu
 WHATSAPP_LINK = "https://wa.me/6281234567890?text=Halo%20TLC%2C%20saya%20ingin%20daftar%20training"
 LOCATIONS = ["TLC Sunter 2 – Zenix 2", "TLC Karawang", "Online (MS Teams)", "On-site (Supplier)"]
+
+# Intent routing knobs — tweak to adjust how strict the classifier vs semantic router should be
+INTENT_CONFIDENCE_THRESHOLD = 0.5  # if logistic classifier confidence >= this, trust it
+SEMANTIC_INTENT_THRESHOLD = 0.6    # otherwise require at least this cosine similarity for semantic routing
 
 # =====================================================
 # 📚 SAMPLE DATA
@@ -160,9 +164,9 @@ train = [
 ]
 X = [x for x, _ in train]
 y = [y for _, y in train]
-clf = Pipeline([
+intent_clf = Pipeline([
     ("tfidf", TfidfVectorizer(ngram_range=(1,2))),
-    ("svm", LinearSVC())
+    ("logreg", LogisticRegression(max_iter=1000))
 ]).fit(X, y)
 
 INTENT_PROFILES = [
@@ -204,13 +208,17 @@ INTENT_PROFILES = [
 ]
 
 def build_intent_vectors():
-    labels, texts = [], []
-    for p in INTENT_PROFILES:
-        labels.append(p["label"])
-        seed = " ".join(p["examples"] + [p["description"]])
-        texts.append(seed)
-    vecs = embed_model.encode(texts, normalize_embeddings=True).astype("float32")
-    return dict(zip(labels, vecs))
+    vectors = {}
+    for profile in INTENT_PROFILES:
+        label = profile["label"]
+        seeds = profile["examples"] + [profile["description"]]
+        emb_matrix = embed_model.encode(seeds, normalize_embeddings=True).astype("float32")
+        avg_vec = np.mean(emb_matrix, axis=0)
+        norm = np.linalg.norm(avg_vec)
+        if norm:
+            avg_vec = (avg_vec / norm).astype("float32")
+        vectors[label] = avg_vec
+    return vectors
 
 intent_vectors = build_intent_vectors()
 
@@ -324,23 +332,40 @@ def handle_rag(text):
     lines.append("Jika masih kurang sesuai, boleh jelaskan sedikit detail (kode kursus, jumlah peserta, atau tujuan training).")
     return "\n".join(lines)
 
-def respond(text):
-    clf_margin = None
+def detect_intent(user_text: str):
+    """Return (intent_name, debug_info) so thresholds can be tuned easily."""
+    debug = {
+        "clf_confidence": None,
+        "semantic_best_intent": None,
+        "semantic_similarity": None,
+    }
+    best_clf_intent, clf_conf = None, 0.0
     try:
-        clf_margin = clf.decision_function([text])[0]
-        clf_conf = float(np.max(clf_margin)) if hasattr(clf_margin, "__len__") else float(clf_margin)
-        intent_clf = clf.predict([text])[0]
+        probs = intent_clf.predict_proba([user_text])[0]
+        classes = intent_clf.named_steps["logreg"].classes_
+        best_idx = int(np.argmax(probs))
+        best_clf_intent = classes[best_idx]
+        clf_conf = float(probs[best_idx])
+        debug["clf_confidence"] = clf_conf
     except Exception:
-        intent_clf, clf_conf = None, None
+        pass
 
-    intent_sem, sem_score = semantic_intent(text)
+    semantic_intent_label, semantic_score = semantic_intent(user_text)
+    debug["semantic_best_intent"] = semantic_intent_label
+    debug["semantic_similarity"] = semantic_score
 
-    # Blend: prefer classifier when confident, otherwise semantic intent
-    intent = intent_clf
-    if clf_conf is None or clf_conf < 0.25:
-        intent = intent_sem
-    elif intent_sem and sem_score > 0.55 and clf_conf < 0.6:
-        intent = intent_sem
+    if best_clf_intent and clf_conf >= INTENT_CONFIDENCE_THRESHOLD:
+        chosen = best_clf_intent
+    elif semantic_intent_label and semantic_score >= SEMANTIC_INTENT_THRESHOLD:
+        chosen = semantic_intent_label
+    else:
+        chosen = None
+
+    debug["final_intent"] = chosen
+    return chosen, debug
+
+def respond(text):
+    intent, _debug = detect_intent(text)
 
     if intent == "catalog": return handle_catalog()
     if intent == "schedule": return handle_schedule(text)
