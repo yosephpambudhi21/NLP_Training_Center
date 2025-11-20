@@ -107,6 +107,16 @@ faqs = pd.DataFrame([
      "a": "Pembatalan ≤ D-5: refund penuh; D-4 s.d D-2: 50%; D-1/no-show: tidak refund (dapat reschedule jika ada slot)."},
     {"q": "Bahasa yang didukung chatbot?",
      "a": "Bahasa Indonesia & Inggris."},
+    {"q": "Apakah TLC bisa in-house di lokasi perusahaan?",
+     "a": "Bisa, kami dapat mengadakan pelatihan on-site/in-house di pabrik atau kantor Anda sesuai jadwal yang disepakati."},
+    {"q": "Berapa minimal peserta untuk in-house training?",
+     "a": "Minimal kuota biasanya ±15 peserta (dapat disesuaikan). Mohon info estimasi peserta untuk proposal."},
+    {"q": "Bagaimana alur permintaan in-house training?",
+     "a": "Umumnya: kirim kebutuhan/topik & jumlah peserta → klarifikasi tujuan & profil peserta → proposal & jadwal → delivery."},
+    {"q": "Apa faktor yang mempengaruhi harga in-house training?",
+     "a": "Jumlah peserta, lokasi, materi/level kustomisasi, serta kebutuhan alat/praktik di lapangan."},
+    {"q": "Bisakah materi disesuaikan dengan proses perusahaan?",
+     "a": "Bisa. Kami dapat menyesuaikan studi kasus/contoh dengan proses dan isu di lini Anda."},
 ])
 
 courses.to_csv("courses.csv", index=False)
@@ -192,6 +202,13 @@ train = [
     ("Apakah bisa in-house training?", "custom"),
     ("Can you deliver on-site custom training?", "custom"),
 
+    # External / In-house request
+    ("Kami ingin mengajukan in-house training JKK", "external_training_request"),
+    ("Apakah TLC bisa datang ke pabrik kami untuk training?", "external_training_request"),
+    ("TLC bisa nggak adain pelatihan di kantor kami?", "external_training_request"),
+    ("We need an on-site training for our company", "external_training_request"),
+    ("Interested in in-house program for 25 pax", "external_training_request"),
+
     # Policy / payment
     ("Kebijakan pembatalan bagaimana?", "policy"),
     ("Metode pembayaran invoice apa?", "policy"),
@@ -246,22 +263,22 @@ intent_clf = Pipeline([
 ]).fit(X, y)
 
 INTENT_PROFILES = [
-    {"label":"catalog", "examples":["katalog","list program","apa saja kursusnya","training tersedia"], "description":"Permintaan daftar program/kursus"},
-    {"label":"schedule","examples":["jadwal","kapan kelas","batch berikut","tanggal training"], "description":"Menanyakan jadwal atau tanggal kelas"},
-    {"label":"pricing","examples":["harga","biaya","fee","tarif"], "description":"Menanyakan harga/biaya pelatihan"},
-    {"label":"registration","examples":["daftar","registrasi","enroll","ikut training"], "description":"Cara mendaftar atau permintaan pendaftaran"},
-    {"label":"custom","examples":["in-house","onsite","ke pabrik","private"], "description":"Meminta pelatihan khusus di lokasi peserta"},
-    {"label":"policy","examples":["batal","refund","pembayaran","invoice"], "description":"Kebijakan pembatalan atau cara bayar"},
-    {"label":"contact","examples":["hubungi","nomor wa","email","kontak"], "description":"Permintaan kontak"},
-    {"label":"about_tlc","examples":["apa itu tlc","tmm in","corporate university"], "description":"Menanyakan profil TLC"},
-    {"label":"program_focus","examples":["ada training safety","leadership ada","quality tools"], "description":"Menanyakan fokus/tema program"},
-    {"label":"trainer_info","examples":["siapa trainer","pengajar","instructor"], "description":"Menanyakan profil trainer"},
-    {"label":"certification","examples":["sertifikat","certificate","diakui"], "description":"Pertanyaan sertifikasi"},
-    {"label":"venue_facility","examples":["fasilitas","parkir","makan siang"], "description":"Fasilitas/venue"},
-    {"label":"support_vendor","examples":["PO","vendor onboarding","e-invoice"], "description":"Dukungan administrasi vendor"},
-    {"label":"faq_general","examples":["mulai jam berapa","durasi","berapa lama"], "description":"Pertanyaan umum jadwal/operasional"},
+    {"label": "catalog", "examples": ["katalog", "list program", "apa saja kursusnya", "training tersedia"], "description": "Permintaan daftar program/kursus"},
+    {"label": "schedule", "examples": ["jadwal", "kapan kelas", "batch berikut", "tanggal training"], "description": "Menanyakan jadwal atau tanggal kelas"},
+    {"label": "pricing", "examples": ["harga", "biaya", "fee", "tarif"], "description": "Menanyakan harga/biaya pelatihan"},
+    {"label": "registration", "examples": ["daftar", "registrasi", "enroll", "ikut training"], "description": "Cara mendaftar atau permintaan pendaftaran"},
+    {"label": "custom", "examples": ["in-house", "onsite", "ke pabrik", "private"], "description": "Meminta pelatihan khusus di lokasi peserta"},
+    {"label": "external_training_request", "examples": ["in-house training", "on-site di pabrik", "datang ke kantor kami", "inhouse untuk company", "request external training"], "description": "Permintaan training eksternal/in-house untuk perusahaan"},
+    {"label": "policy", "examples": ["batal", "refund", "pembayaran", "invoice"], "description": "Kebijakan pembatalan atau cara bayar"},
+    {"label": "contact", "examples": ["hubungi", "nomor wa", "email", "kontak"], "description": "Permintaan kontak"},
+    {"label": "about_tlc", "examples": ["apa itu tlc", "tmm in", "corporate university"], "description": "Menanyakan profil TLC"},
+    {"label": "program_focus", "examples": ["ada training safety", "leadership ada", "quality tools"], "description": "Menanyakan fokus/tema program"},
+    {"label": "trainer_info", "examples": ["siapa trainer", "pengajar", "instructor"], "description": "Menanyakan profil trainer"},
+    {"label": "certification", "examples": ["sertifikat", "certificate", "diakui"], "description": "Pertanyaan sertifikasi"},
+    {"label": "venue_facility", "examples": ["fasilitas", "parkir", "makan siang"], "description": "Fasilitas/venue"},
+    {"label": "support_vendor", "examples": ["PO", "vendor onboarding", "e-invoice"], "description": "Dukungan administrasi vendor"},
+    {"label": "faq_general", "examples": ["mulai jam berapa", "durasi", "berapa lama"], "description": "Pertanyaan umum jadwal/operasional"},
 ]
-
 def build_intent_vectors():
     vectors = {}
     for profile in INTENT_PROFILES:
@@ -320,17 +337,25 @@ def detect_intent(text:str):
 # slots
 DATE_RX = re.compile(r"(20\d{2}-\d{2}-\d{2})|(\d{1,2}\s*(Nov|Dec|Jan|Feb|Mar|Apr|Mei|May|Jun|Jul|Aug|Sep|Okt|Oct)\s*20\d{2})", re.I)
 PAX_RX  = re.compile(r"(\d+)\s*(pax|orang|peserta|people)", re.I)
+BARE_PAX_RX = re.compile(r"^\s*(\d{1,3})\s*$")
 COURSE_RX = re.compile(r"(JKK[-\s]?\w+|TCLASS[-\s]?\w+|QCC[-\s]?\w+|XEV[-\s]?\w+|SAFETY[-\s]?\w+)", re.I)
 COMPANY_RX = re.compile(r"(PT\s+[A-Za-z0-9.&()\-\s]+)", re.I)
+LOCATION_RX = re.compile(
+    r"(karawang|sunter|jakarta|bandung|bekasi|cikarang|purwakarta|cibitung|cikande|depok|bogor|tangerang|semarang|surabaya|bali|yogyakarta|jogja|medan|makassar|batam|balikpapan|samarinda)",
+    re.I,
+)
 
 def extract_slots(text):
     slots = {}
     if not isinstance(text, str): 
         return slots
     m = PAX_RX.search(text);     slots["pax"]    = int(re.sub(r"\D","",m.group(1))) if m else None
+    if not slots.get("pax") and BARE_PAX_RX.match(text.strip()):
+        slots["pax"] = int(text.strip())
     m = COURSE_RX.search(text);  slots["course"] = m.group(0).upper().replace(" ","") if m else None
     m = DATE_RX.search(text);    slots["date"]   = m.group(0) if m else None
     m = COMPANY_RX.search(text); slots["company"]= m.group(0).strip() if m else None
+    m = LOCATION_RX.search(text); slots["location"] = m.group(0).title().strip() if m else None
     return {k:v for k,v in slots.items() if v}
 
 # ---------- 5b) Session state helpers ----------
@@ -341,6 +366,7 @@ SESSION_STATE_TEMPLATE = {
     "participants": None,
     "preferred_dates": None,
     "company_name": None,
+    "location": None,
     "mode": None,  # "internal" | "external"
 }
 
@@ -392,14 +418,25 @@ def apply_context_rules(text, intent, debug_info, state, slots):
         if any(word in normalized for word in PRICING_KEYWORDS):
             chosen = "pricing"
 
+    # Rule: if user keeps talking about in-house/external and we already track that context, stay on it
+    if low_conf and state.get("current_intent") == "external_training_request":
+        if any(word in normalized for word in EXTERNAL_KEYWORDS):
+            chosen = "external_training_request"
+
     # Rule: follow-up asking for in-house/external delivery keeps the course context
     if any(word in normalized for word in EXTERNAL_KEYWORDS):
         if state.get("current_course_code") or state.get("current_course_title") or slots.get("course"):
-            chosen = "custom"
+            chosen = "external_training_request"
             state["mode"] = "external"
 
+    # Rule: if user shares lokasi + course hint with low confidence, assume external request
+    if low_conf and (slots.get("location") or state.get("location")):
+        if state.get("current_course_code") or state.get("current_course_title") or slots.get("course"):
+            chosen = "external_training_request"
+            state["mode"] = state.get("mode") or "external"
+
     # Rule: continuing registration/external flow with participant info should not drop the flow
-    if state.get("current_intent") in {"registration", "custom"} and slots.get("pax"):
+    if state.get("current_intent") in {"registration", "custom", "external_training_request"} and slots.get("pax"):
         if chosen is None:
             chosen = state.get("current_intent")
 
@@ -421,6 +458,8 @@ def update_state_from_slots(state, slots, course_match=None):
         state["participants"] = slots["pax"]
     if slots.get("company"):
         state["company_name"] = slots["company"]
+    if slots.get("location"):
+        state["location"] = slots["location"]
     if slots.get("date"):
         append_unique_date(state, slots["date"])
 
@@ -434,6 +473,8 @@ def detect_missing_slots(slots, state):
         missing.append("company_name")
     if not (slots.get("pax") or state.get("participants")):
         missing.append("participants")
+    if not (slots.get("location") or state.get("location")):
+        missing.append("location")
     if not (slots.get("date") or (state.get("preferred_dates") and len(state.get("preferred_dates")) > 0)):
         missing.append("preferred_dates")
     return missing
@@ -522,6 +563,56 @@ def handle_custom(text, session_state=None, slots=None):
     • Kirim kebutuhan (tujuan, profil peserta, tanggal target) ke {CONTACT_EMAIL} atau WA {WHATSAPP_LINK}.
     """).strip()
 
+
+def handle_external_training_request(text, session_state=None, slots=None):
+    """Respond to in-house/external training requests with slot echo + next questions."""
+    slots = slots or extract_slots(text)
+    state = ensure_session_state(session_state)
+    state["mode"] = state.get("mode") or "external"
+
+    course = slots.get("course") or state.get("current_course_code") or state.get("current_course_title") or "(kode/judul kursus?)"
+    course_title = state.get("current_course_title")
+    course_line = f"• Kursus/topik: {course}"
+    if course_title and course_title not in course:
+        course_line += f" – {course_title}"
+
+    company = slots.get("company") or state.get("company_name") or "(nama perusahaan?)"
+    pax = slots.get("pax") or state.get("participants") or "(jumlah peserta?)"
+    loc = slots.get("location") or state.get("location") or "(lokasi/kota?)"
+    dates = slots.get("date") or ", ".join(state.get("preferred_dates") or []) or "(waktu target?)"
+
+    missing = detect_missing_slots(slots, state)
+    followups = []
+    if "company_name" in missing:
+        followups.append("Nama perusahaan?")
+    if "participants" in missing:
+        followups.append("Estimasi jumlah peserta?")
+    if "location" in missing:
+        followups.append("Lokasi training (pabrik/kantor/hotel) dan kota?")
+    if "preferred_dates" in missing:
+        followups.append("Tanggal target atau bulan rencana?")
+    if "course" in missing:
+        followups.append("Topik atau kode kursus yang diinginkan?")
+
+    lines = [
+        "Siap, kami catat permintaan in-house / on-site training:",
+        f"• Perusahaan: {company}",
+        course_line,
+        f"• Perkiraan peserta: {pax}",
+        f"• Lokasi/area: {loc}",
+        f"• Waktu target: {dates}",
+        "",
+        "Materi bisa disesuaikan dengan proses dan studi kasus Anda.",
+    ]
+    if followups:
+        lines.append("Mohon info tambahan agar kami siapkan proposal:")
+        for q in followups:
+            lines.append(f"- {q}")
+    else:
+        lines.append(f"Tim TLC akan hubungi lewat email/WA yang Anda berikan ({CONTACT_EMAIL} / {WHATSAPP_LINK}).")
+
+    return "\n".join(lines)
+
 def handle_policy():
     hits = faqs[faqs.q.str.contains("pembatalan|kebijakan", case=False, regex=True)]
     return hits.iloc[0].a if not hits.empty else "Pembatalan ≤ D-5: full refund; D-4–D-2: 50%; D-1/no-show: no refund."
@@ -580,6 +671,8 @@ def generate_fallback_response(user_text, rag_results, detected_slots, missing_s
         followups.append("Nama perusahaan Anda?")
     if "participants" in missing_slots:
         followups.append("Estimasi jumlah peserta?")
+    if "location" in missing_slots:
+        followups.append("Lokasi training yang diinginkan (pabrik/kantor/hotel dan kota)?")
     if "preferred_dates" in missing_slots:
         followups.append("Tanggal target atau bulan rencana training?")
 
@@ -618,6 +711,8 @@ def respond(user_text, session_state=None):
 
     if intent:
         state["current_intent"] = intent
+        if intent == "external_training_request":
+            state["mode"] = state.get("mode") or "external"
 
     fallback_needed = (intent is None) or (intent == "other") or low_conf_router
 
@@ -629,6 +724,8 @@ def respond(user_text, session_state=None):
         reply = handle_pricing(user_text, session_state=state, slots=slots)
     elif not fallback_needed and intent == "registration":
         reply = handle_registration(user_text, session_state=state, slots=slots)
+    elif not fallback_needed and intent == "external_training_request":
+        reply = handle_external_training_request(user_text, session_state=state, slots=slots)
     elif not fallback_needed and intent == "custom":
         reply = handle_custom(user_text, session_state=state, slots=slots)
     elif not fallback_needed and intent == "policy":
@@ -679,6 +776,7 @@ quick_msgs = [
     "Harga TClass",
     "Daftar 10 pax untuk JKK-SV-101",
     "Bisa in-house di pabrik kami PT XYZ?",
+    "Minta proposal in-house 20 orang di Karawang",
     "Kebijakan pembatalan",
     "Kontak & lokasi"
 ]

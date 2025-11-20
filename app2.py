@@ -61,6 +61,9 @@ EXTERNAL_KEYWORDS = [
     "onsite",
     "on-site",
     "di lokasi kami",
+    "bisa external",
+    "di luar site",
+    "bisa diadakan di luar",
 ]
 
 # =====================================================
@@ -113,6 +116,16 @@ faqs = pd.DataFrame([
      "a": f"Utamanya {LOCATIONS[0]} dan {LOCATIONS[1]}. Bisa on-site di pabrik supplier."},
     {"q": "Kebijakan pembatalan?",
      "a": "Pembatalan ≤ D-5: refund penuh; D-4 s.d D-2: 50 %; D-1/no-show: tidak refund (bisa reschedule bila slot tersedia)."},
+    {"q": "Apakah TLC bisa in-house di lokasi perusahaan?",
+     "a": "Bisa, kami dapat mengadakan pelatihan on-site/in-house di pabrik atau kantor Anda sesuai jadwal yang disepakati."},
+    {"q": "Berapa minimal peserta untuk in-house training?",
+     "a": "Minimal kuota biasanya ±15 peserta (dapat disesuaikan). Mohon info estimasi peserta untuk proposal."},
+    {"q": "Bagaimana alur permintaan in-house training?",
+     "a": "Umumnya: kirim kebutuhan/topik & jumlah peserta → klarifikasi tujuan & profil peserta → proposal & jadwal → delivery."},
+    {"q": "Apa faktor yang mempengaruhi harga in-house training?",
+     "a": "Jumlah peserta, lokasi, materi/level kustomisasi, serta kebutuhan alat/praktik di lapangan."},
+    {"q": "Bisakah materi disesuaikan dengan proses perusahaan?",
+     "a": "Bisa. Kami dapat menyesuaikan studi kasus/contoh dengan proses dan isu di lini Anda."},
 ])
 
 # =====================================================
@@ -186,6 +199,12 @@ train = [
     # Custom / in-house
     ("Bisa training di pabrik kami", "custom"),
     ("bisa inhouse di Karawang", "custom"),
+    # External / in-house request
+    ("Kami ingin ajukan in-house training untuk perusahaan", "external_training_request"),
+    ("Bisakah TLC datang ke plant kami untuk JKK?", "external_training_request"),
+    ("TLC bisa nggak adain pelatihan di kantor kami?", "external_training_request"),
+    ("We need onsite training for our company", "external_training_request"),
+    ("Interested in in-house program for 20 pax", "external_training_request"),
     # Policy / cancellation
     ("Kebijakan pembatalan", "policy"),
     ("kalau cancel apa bisa refund", "policy"),
@@ -227,17 +246,21 @@ INTENT_PROFILES = [
         "description": "Meminta pelatihan khusus/in-house di lokasi peserta"
     },
     {
+        "label": "external_training_request",
+        "examples": ["in-house training", "onsite di pabrik", "datang ke kantor kami", "inhouse untuk company", "request external training"],
+        "description": "Permintaan training eksternal/in-house untuk perusahaan"
+    },
+    {
         "label": "policy",
-        "examples": ["batal", "refund", "reschedule", "pembatalan"],
-        "description": "Menanyakan kebijakan pembatalan atau reschedule"
+        "examples": ["batal", "refund", "pembatalan", "cancel"],
+        "description": "Kebijakan pembatalan / pembayaran"
     },
     {
         "label": "contact",
-        "examples": ["hubungi", "whatsapp", "nomor", "email"],
-        "description": "Meminta kontak person atau channel komunikasi"
+        "examples": ["kontak", "hubungi", "nomor wa", "email"],
+        "description": "Meminta detail kontak TLC"
     },
 ]
-
 def build_intent_vectors():
     vectors = {}
     for profile in INTENT_PROFILES:
@@ -264,15 +287,28 @@ def semantic_intent(text):
 
 DATE_RX = re.compile(r"(20\d{2}-\d{2}-\d{2})", re.I)
 PAX_RX  = re.compile(r"(\d+)\s*(pax|orang|peserta|people)", re.I)
+BARE_PAX_RX = re.compile(r"^\s*(\d{1,3})\s*$")
 COURSE_RX = re.compile(r"(JKK[-\s]?\w+|TCLASS[-\s]?\w+|QCC[-\s]?\w+)", re.I)
 COMPANY_RX = re.compile(r"(PT\s+[A-Za-z0-9.&()\-\s]+)", re.I)
+LOCATION_RX = re.compile(
+    r"(karawang|sunter|jakarta|bandung|bekasi|cikarang|purwakarta|cibitung|cikande|depok|bogor|tangerang|semarang|surabaya|bali|yogyakarta|jogja|medan|makassar|batam|balikpapan|samarinda)",
+    re.I,
+)
 
 def extract_slots(text):
     s = {}
-    if m:=PAX_RX.search(text): s["pax"]=int(m.group(1))
-    if m:=COURSE_RX.search(text): s["course"]=m.group(1).upper().replace(" ","")
-    if m:=COMPANY_RX.search(text): s["company"]=m.group(1).strip()
-    if m:=DATE_RX.search(text): s["date"]=m.group(1)
+    if m:=PAX_RX.search(text):
+        s["pax"]=int(m.group(1))
+    elif isinstance(text, str) and BARE_PAX_RX.match(text.strip()):
+        s["pax"] = int(text.strip())
+    if m:=COURSE_RX.search(text):
+        s["course"]=m.group(1).upper().replace(" ","")
+    if m:=COMPANY_RX.search(text):
+        s["company"]=m.group(1).strip()
+    if m:=DATE_RX.search(text):
+        s["date"]=m.group(1)
+    if m:=LOCATION_RX.search(text):
+        s["location"] = m.group(1).title().strip()
     return s
 
 SESSION_STATE_TEMPLATE = {
@@ -282,6 +318,7 @@ SESSION_STATE_TEMPLATE = {
     "participants": None,
     "preferred_dates": None,
     "company_name": None,
+    "location": None,
     "mode": None,
 }
 
@@ -328,11 +365,18 @@ def apply_context_rules(text, intent, debug, state, slots):
     if low_conf and state.get("current_intent") in {"catalog", "registration"}:
         if any(word in normalized for word in PRICING_KEYWORDS):
             chosen = "pricing"
+    if low_conf and state.get("current_intent") == "external_training_request":
+        if any(word in normalized for word in EXTERNAL_KEYWORDS):
+            chosen = "external_training_request"
     if any(word in normalized for word in EXTERNAL_KEYWORDS):
         if state.get("current_course_code") or state.get("current_course_title") or slots.get("course"):
-            chosen = "custom"
+            chosen = "external_training_request"
             state["mode"] = "external"
-    if state.get("current_intent") in {"registration", "custom"} and slots.get("pax"):
+    if low_conf and (slots.get("location") or state.get("location")):
+        if state.get("current_course_code") or state.get("current_course_title") or slots.get("course"):
+            chosen = "external_training_request"
+            state["mode"] = state.get("mode") or "external"
+    if state.get("current_intent") in {"registration", "custom", "external_training_request"} and slots.get("pax"):
         if chosen is None:
             chosen = state.get("current_intent")
     return chosen
@@ -354,6 +398,8 @@ def update_state_from_slots(state, slots, course_match=None):
         state["participants"] = slots["pax"]
     if slots.get("company"):
         state["company_name"] = slots["company"]
+    if slots.get("location"):
+        state["location"] = slots["location"]
     if slots.get("date"):
         append_unique_date(state, slots["date"])
 
@@ -366,6 +412,8 @@ def detect_missing_slots(slots, state):
         missing.append("company_name")
     if not (slots.get("pax") or state.get("participants")):
         missing.append("participants")
+    if not (slots.get("location") or state.get("location")):
+        missing.append("location")
     if not (slots.get("date") or (state.get("preferred_dates") and len(state.get("preferred_dates")) > 0)):
         missing.append("preferred_dates")
     return missing
@@ -466,6 +514,55 @@ def handle_custom(text, session_state=None, slots=None):
     • Minimal kuota ±15 peserta, jadwal fleksibel 2–3 minggu dari konfirmasi.
     """).strip()
 
+
+def handle_external_training_request(text, session_state=None, slots=None):
+    """Echo detected slots for in-house/external training and ask for gaps."""
+    slots = slots or extract_slots(text)
+    state = ensure_session_state(session_state)
+    state["mode"] = state.get("mode") or "external"
+
+    course = slots.get("course") or state.get("current_course_code") or state.get("current_course_title") or "(kode/topik?)"
+    course_title = state.get("current_course_title")
+    course_line = f"• Kursus/topik: {course}"
+    if course_title and course_title not in course:
+        course_line += f" – {course_title}"
+
+    company = slots.get("company") or state.get("company_name") or "(nama perusahaan?)"
+    pax = slots.get("pax") or state.get("participants") or "(jumlah peserta?)"
+    loc = slots.get("location") or state.get("location") or "(lokasi/kota?)"
+    dates = slots.get("date") or ", ".join(state.get("preferred_dates") or []) or "(waktu target?)"
+
+    missing = detect_missing_slots(slots, state)
+    prompts = []
+    if "company_name" in missing:
+        prompts.append("Nama perusahaan?")
+    if "participants" in missing:
+        prompts.append("Estimasi jumlah peserta?")
+    if "location" in missing:
+        prompts.append("Lokasi training (pabrik/kantor/hotel) dan kota?")
+    if "preferred_dates" in missing:
+        prompts.append("Tanggal target atau bulan rencana?")
+    if "course" in missing:
+        prompts.append("Topik atau kode kursus yang diinginkan?")
+
+    lines = [
+        "Siap, kami catat permintaan in-house / on-site:",
+        f"• Perusahaan: {company}",
+        course_line,
+        f"• Perkiraan peserta: {pax}",
+        f"• Lokasi/area: {loc}",
+        f"• Waktu target: {dates}",
+        "Materi dapat disesuaikan dengan proses dan studi kasus Anda.",
+    ]
+    if prompts:
+        lines.append("Mohon info tambahan agar proposalnya sesuai:")
+        for q in prompts:
+            lines.append(f"- {q}")
+    else:
+        lines.append(f"Tim TLC akan follow-up via email/WA ({CONTACT_EMAIL} / {WHATSAPP_LINK}).")
+
+    return "\n".join(lines)
+
 def handle_policy(): 
     return faqs.iloc[3].a
 
@@ -484,6 +581,8 @@ def generate_fallback_response(user_text, rag_results, detected_slots, missing_s
         followups.append("Nama perusahaan Anda?")
     if "participants" in missing_slots:
         followups.append("Estimasi jumlah peserta?")
+    if "location" in missing_slots:
+        followups.append("Lokasi training (pabrik/kantor/hotel) dan kota?")
     if "preferred_dates" in missing_slots:
         followups.append("Tanggal target / bulan rencana?")
 
@@ -551,6 +650,8 @@ def respond(text, session_state=None):
 
     if intent:
         state["current_intent"] = intent
+        if intent == "external_training_request":
+            state["mode"] = state.get("mode") or "external"
 
     fallback_needed = (intent is None) or (intent == "other") or low_conf_router
 
@@ -562,6 +663,8 @@ def respond(text, session_state=None):
         reply = handle_pricing(text, session_state=state, slots=slots)
     elif not fallback_needed and intent == "registration":
         reply = handle_registration(text, session_state=state, slots=slots)
+    elif not fallback_needed and intent == "external_training_request":
+        reply = handle_external_training_request(text, session_state=state, slots=slots)
     elif not fallback_needed and intent == "custom":
         reply = handle_custom(text, session_state=state, slots=slots)
     elif not fallback_needed and intent == "policy":
@@ -601,6 +704,7 @@ quick_msgs = [
     "Harga TClass",
     "Daftar 10 pax untuk JKK-SV-101",
     "Bisa in-house di pabrik kami PT XYZ?",
+    "Minta proposal in-house 20 orang di Karawang",
     "Kebijakan pembatalan",
     "Kontak & lokasi"
 ]
