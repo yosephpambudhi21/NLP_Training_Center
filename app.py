@@ -5,6 +5,8 @@ import sys, subprocess, importlib, os, re, textwrap
 from datetime import datetime
 
 # ---------- 0) Install minimal deps (format Python) ----------
+# Disable pip bootstrap when running automated evaluations by setting TLC_SKIP_PIP=1
+SKIP_PIP = os.environ.get("TLC_SKIP_PIP") == "1"
 pkgs = [
     "gradio==4.44.1",
     "sentence-transformers==3.0.1",
@@ -14,11 +16,16 @@ pkgs = [
     "python-dateutil==2.9.0.post0",
     "posthog==3.7.2",
 ]
-subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], check=False)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=False)
+if not SKIP_PIP:
+    subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], check=False)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=False)
+
+if not SKIP_PIP:
+    import gradio as gr
+else:
+    gr = None
 
 # ---------- 1) Imports ----------
-import gradio as gr
 import pandas as pd
 import numpy as np
 from langdetect import detect
@@ -811,32 +818,40 @@ def chat_fn(history, message, session_state, name, company, email, phone, intere
     history = (history or []) + [(msg_text, reply)]
     return history, updated_state, ""
 
-with gr.Blocks(theme="soft") as demo:
-    gr.Markdown(f"### 🤖 {ORG_NAME} — Training Assistant (Beta)\nDukungan: ID/EN • Timezone: {TZ}\n\n"
-                f"[Form Registrasi]({REG_FORM_URL}) • [WhatsApp]({WHATSAPP_LINK})")
+def main():
+    if gr is None:
+        raise ImportError("gradio is required to launch the UI. Set TLC_SKIP_PIP=0 and install dependencies.")
 
-    with gr.Row():
-        with gr.Column(scale=3):
-            name = gr.Textbox(label="Nama (optional)")
-            company = gr.Textbox(label="Perusahaan (optional)")
-            email = gr.Textbox(label="Email (optional)")
-            phone = gr.Textbox(label="No HP/WA (optional)")
-            interest = gr.Dropdown(["","JKK","TClass","QCC","Custom In-house","Other"], label="Minat (opsional)", value="")
-            gr.Markdown("**Quick prompts:**")
-            qp = gr.Radio(choices=quick_msgs, label="Pilih contoh pesan")
-            qp_btn = gr.Button("Kirim Quick Prompt")
+    with gr.Blocks(theme="soft") as demo:
+        gr.Markdown(f"### 🤖 {ORG_NAME} — Training Assistant (Beta)\nDukungan: ID/EN • Timezone: {TZ}\n\n"
+                    f"[Form Registrasi]({REG_FORM_URL}) • [WhatsApp]({WHATSAPP_LINK})")
 
-        with gr.Column(scale=7):
-            chat = gr.Chatbot(height=420)  # default tuple mode
-            msg = gr.Textbox(label="Ketik pertanyaan Anda…")
-            send = gr.Button("Kirim", variant="primary")
+        with gr.Row():
+            with gr.Column(scale=3):
+                name = gr.Textbox(label="Nama (optional)")
+                company = gr.Textbox(label="Perusahaan (optional)")
+                email = gr.Textbox(label="Email (optional)")
+                phone = gr.Textbox(label="No HP/WA (optional)")
+                interest = gr.Dropdown(["","JKK","TClass","QCC","Custom In-house","Other"], label="Minat (opsional)", value="")
+                gr.Markdown("**Quick prompts:**")
+                qp = gr.Radio(choices=quick_msgs, label="Pilih contoh pesan")
+                qp_btn = gr.Button("Kirim Quick Prompt")
 
-    session_state = gr.State(init_session_state())
+            with gr.Column(scale=7):
+                chat = gr.Chatbot(height=420)  # default tuple mode
+                msg = gr.Textbox(label="Ketik pertanyaan Anda…")
+                send = gr.Button("Kirim", variant="primary")
 
-    qp_btn.click(lambda c: c or "Lihat katalog pelatihan", qp, msg)
-    send.click(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
-               outputs=[chat, session_state, msg])
-    msg.submit(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
-               outputs=[chat, session_state, msg])
+        session_state = gr.State(init_session_state())
 
-demo.launch(debug=False, share=True)
+        qp_btn.click(lambda c: c or "Lihat katalog pelatihan", qp, msg)
+        send.click(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
+                   outputs=[chat, session_state, msg])
+        msg.submit(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
+                   outputs=[chat, session_state, msg])
+
+    demo.launch(debug=False, share=True)
+
+
+if __name__ == "__main__":
+    main()
