@@ -14,3 +14,7 @@ The version for local pyton runtime is app2.py
 courses.csv is the list of courses, faq for frequently asked questions, leads is the format on the left
 
 MIT Liscence
+
+## Technical documentation
+
+See [docs/TECHNICAL.md](docs/TECHNICAL.md) for architecture, intent routing, session state, and evaluation details.
