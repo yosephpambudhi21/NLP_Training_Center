@@ -1,9 +1,28 @@
 # ===============================
 # 🤖 TLC Training Chatbot — Local Full App
 # ===============================
+import importlib.util
 import os, re, textwrap
 import numpy as np
 from datetime import datetime
+
+# Bail out early with a clear message when runtime dependencies are missing.
+_REQUIRED_PACKAGES = [
+    "numpy",
+    "pandas",
+    "sklearn",
+    "gradio",
+    "sentence_transformers",
+]
+_missing = [pkg for pkg in _REQUIRED_PACKAGES if importlib.util.find_spec(pkg) is None]
+if _missing:
+    raise SystemExit(
+        "Missing dependencies: "
+        + ", ".join(_missing)
+        + "\nPlease install via `pip install -r requirements.txt` before running app2.py."
+    )
+
+import numpy as np
 import gradio as gr
 import pandas as pd
 from sklearn.pipeline import Pipeline
