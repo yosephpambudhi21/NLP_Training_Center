@@ -1,12 +1,7 @@
-# Install these through pip into your own virtual requirements
-pkgs = [
-    "gradio==4.44.1",
-    "sentence-transformers==3.0.1",
-    "scikit-learn==1.6.1",
-    "pandas==2.2.2",
-    "langdetect==1.0.9",
-    "python-dateutil==2.9.0.post0",
-    "posthog==3.7.2",
-]
-subprocess.run([sys.executable, "-m", "pip", "install", "--upgrade", "pip"], check=False)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q"] + pkgs, check=False)
+gradio==4.44.1
+sentence-transformers==3.0.1
+scikit-learn==1.6.1
+pandas==2.2.2
+langdetect==1.0.9
+python-dateutil==2.9.0.post0
+posthog==3.7.2
