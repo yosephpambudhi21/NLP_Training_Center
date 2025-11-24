@@ -131,7 +131,38 @@ faqs = pd.DataFrame([
 # =====================================================
 # 🔍 RAG INDEX
 # =====================================================
-embed_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
+def build_embedder(corpus_texts):
+    """Load sentence-transformer if available; otherwise fall back to TF-IDF."""
+    model_name = os.environ.get("TLC_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+    if os.environ.get("TLC_OFFLINE_MODE") != "1":
+        try:
+            model = SentenceTransformer(model_name)
+
+            def _encode(texts, normalize_embeddings=True):
+                vecs = model.encode(texts, normalize_embeddings=normalize_embeddings)
+                return vecs.astype("float32")
+
+            return _encode, "sentence_transformer"
+        except Exception as exc:  # noqa: BLE001
+            print(
+                "[WARN] Gagal memuat model embedding dari HuggingFace; "
+                "menggunakan fallback TF-IDF lokal. Error:",
+                exc,
+            )
+
+    vectorizer = TfidfVectorizer()
+    vectorizer.fit(corpus_texts)
+
+    def _encode(texts, normalize_embeddings=True):
+        mat = vectorizer.transform(texts)
+        if normalize_embeddings:
+            norms = np.sqrt((mat.power(2)).sum(axis=1))
+            norms[norms == 0] = 1
+            mat = mat.multiply(1 / norms)
+        return mat.toarray().astype("float32")
+
+    return _encode, "tfidf_fallback"
+
 
 def build_corpus():
     docs, meta = [], []
@@ -147,11 +178,12 @@ def build_corpus():
     return docs, meta
 
 docs, meta = build_corpus()
-emb = embed_model.encode(docs, normalize_embeddings=True).astype("float32")
+encode_fn, embed_backend = build_embedder(docs)
+emb = encode_fn(docs, normalize_embeddings=True)
 _nn = NearestNeighbors(metric="cosine").fit(emb)
 
 def rag_search(query, k=3):
-    qv = embed_model.encode([query], normalize_embeddings=True).astype("float32")
+    qv = encode_fn([query], normalize_embeddings=True)
     dists, ids = _nn.kneighbors(qv, n_neighbors=min(k, len(docs)))
     out = []
     for d, i in zip(dists[0], ids[0]):
@@ -266,7 +298,7 @@ def build_intent_vectors():
     for profile in INTENT_PROFILES:
         label = profile["label"]
         seeds = profile["examples"] + [profile["description"]]
-        emb_matrix = embed_model.encode(seeds, normalize_embeddings=True).astype("float32")
+        emb_matrix = encode_fn(seeds, normalize_embeddings=True)
         avg_vec = np.mean(emb_matrix, axis=0)
         norm = np.linalg.norm(avg_vec)
         if norm:
@@ -277,7 +309,7 @@ def build_intent_vectors():
 intent_vectors = build_intent_vectors()
 
 def semantic_intent(text):
-    qv = embed_model.encode([text], normalize_embeddings=True).astype("float32")[0]
+    qv = encode_fn([text], normalize_embeddings=True)[0]
     best_intent, best_score = None, -1.0
     for intent, vec in intent_vectors.items():
         score = float(np.dot(qv, vec))
