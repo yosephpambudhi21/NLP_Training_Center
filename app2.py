@@ -69,6 +69,10 @@ LOCATIONS = ["TLC Sunter 2 – Zenix 2", "TLC Karawang", "Online (MS Teams)", "O
 INTENT_CONFIDENCE_THRESHOLD = 0.5  # if logistic classifier confidence >= this, trust it
 SEMANTIC_INTENT_THRESHOLD = 0.6    # otherwise require at least this cosine similarity for semantic routing
 
+# Networking/launch toggles
+DEFAULT_OFFLINE_MODE = os.environ.get("TLC_OFFLINE_MODE", "1") == "1"
+SHARE_UI = os.environ.get("TLC_SHARE", "0") == "1"
+
 PRICING_KEYWORDS = ["harga", "biaya", "cost", "fee", "tarif"]
 EXTERNAL_KEYWORDS = [
     "in-house",
@@ -153,9 +157,10 @@ faqs = pd.DataFrame([
 def build_embedder(corpus_texts):
     """Load sentence-transformer if available; otherwise fall back to TF-IDF."""
     model_name = os.environ.get("TLC_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    if os.environ.get("TLC_OFFLINE_MODE") != "1":
+    offline = DEFAULT_OFFLINE_MODE
+    if not offline:
         try:
-            model = SentenceTransformer(model_name)
+            model = SentenceTransformer(model_name, local_files_only=False)
 
             def _encode(texts, normalize_embeddings=True):
                 vecs = model.encode(texts, normalize_embeddings=normalize_embeddings)
@@ -168,6 +173,8 @@ def build_embedder(corpus_texts):
                 "menggunakan fallback TF-IDF lokal. Error:",
                 exc,
             )
+    else:
+        print("[INFO] TLC_OFFLINE_MODE aktif: menggunakan embedding TF-IDF lokal.")
 
     vectorizer = TfidfVectorizer()
     vectorizer.fit(corpus_texts)
@@ -773,7 +780,7 @@ def chat_fn(history, message, session_state, name, company, email, phone, intere
     return history, updated_state, ""
 
 def main():
-    with gr.Blocks(theme="soft") as demo:
+    with gr.Blocks(theme="soft", analytics_enabled=False) as demo:
         gr.Markdown(f"### 🤖 {ORG_NAME} — Training Assistant\nHubungi: {CONTACT_EMAIL}")
         with gr.Row():
             with gr.Column(scale=3):
@@ -789,7 +796,7 @@ def main():
         session_state = gr.State(init_session_state())
         send.click(chat_fn, [chat,msg,session_state,name,company,email,phone,interest], [chat,session_state,msg])
         msg.submit(chat_fn, [chat,msg,session_state,name,company,email,phone,interest], [chat,session_state,msg])
-    demo.launch(share=True, debug=True, show_error=True)
+    demo.launch(share=SHARE_UI, debug=True, show_error=True)
 
 if __name__ == "__main__":
     main()

@@ -47,6 +47,10 @@ LOCATIONS = ["TLC Sunter 2 – Zenix 2", "TLC Karawang", "Online (MS Teams)", "O
 INTENT_CONFIDENCE_THRESHOLD = 0.5  # classifier must be at least this confident
 SEMANTIC_INTENT_THRESHOLD = 0.6    # semantic similarity must exceed this when classifier is uncertain
 
+# Networking/launch toggles
+DEFAULT_OFFLINE_MODE = os.environ.get("TLC_OFFLINE_MODE", "1") == "1"
+SHARE_UI = os.environ.get("TLC_SHARE", "0") == "1"
+
 # Conversational context helpers (keywords for lightweight rules)
 PRICING_KEYWORDS = ["harga", "biaya", "cost", "fee", "tarif"]
 EXTERNAL_KEYWORDS = [
@@ -136,9 +140,10 @@ faqs = pd.read_csv("faqs.csv")
 def build_embedder(corpus_texts):
     """Load sentence-transformer if available; otherwise fall back to TF-IDF."""
     model_name = os.environ.get("TLC_EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-    if os.environ.get("TLC_OFFLINE_MODE") != "1":
+    offline = DEFAULT_OFFLINE_MODE
+    if not offline:
         try:
-            model = SentenceTransformer(model_name)
+            model = SentenceTransformer(model_name, local_files_only=False)
 
             def _encode(texts, normalize_embeddings=True):
                 vecs = model.encode(texts, normalize_embeddings=normalize_embeddings)
@@ -151,6 +156,8 @@ def build_embedder(corpus_texts):
                 "menggunakan fallback TF-IDF lokal. Error:",
                 exc,
             )
+    else:
+        print("[INFO] TLC_OFFLINE_MODE aktif: menggunakan embedding TF-IDF lokal.")
 
     vectorizer = TfidfVectorizer()
     vectorizer.fit(corpus_texts)
@@ -855,7 +862,7 @@ def main():
     if gr is None:
         raise ImportError("gradio is required to launch the UI. Set TLC_SKIP_PIP=0 and install dependencies.")
 
-    with gr.Blocks(theme="soft") as demo:
+    with gr.Blocks(theme="soft", analytics_enabled=False) as demo:
         gr.Markdown(f"### 🤖 {ORG_NAME} — Training Assistant (Beta)\nDukungan: ID/EN • Timezone: {TZ}\n\n"
                     f"[Form Registrasi]({REG_FORM_URL}) • [WhatsApp]({WHATSAPP_LINK})")
 
@@ -883,7 +890,7 @@ def main():
         msg.submit(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
                    outputs=[chat, session_state, msg])
 
-    demo.launch(debug=False, share=True)
+    demo.launch(debug=False, share=SHARE_UI)
 
 
 if __name__ == "__main__":
