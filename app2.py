@@ -3,6 +3,7 @@
 # ===============================
 import importlib.util
 import os, re, textwrap
+import numpy as np
 from datetime import datetime
 
 # Bail out early with a clear message when runtime dependencies are missing.
