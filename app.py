@@ -916,7 +916,11 @@ def main():
         msg.submit(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
                    outputs=[chat, session_state, msg])
 
-    demo.launch(debug=False, share=SHARE_UI)
+    # Gradio 4.x dapat memicu error serialisasi skema API pada lingkungan terbatas (mis. Colab)
+    # sehingga kita matikan dokumentasi API (show_api=False).
+    # Selain itu, Colab tidak mengizinkan akses langsung ke localhost sehingga share harus True.
+    share_flag = SHARE_UI or IN_COLAB
+    demo.launch(debug=False, share=share_flag, show_api=False)
 
 
 if __name__ == "__main__":
