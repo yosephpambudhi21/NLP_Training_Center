@@ -9,6 +9,9 @@ IN_COLAB = "COLAB_RELEASE_TAG" in os.environ or "COLAB_GPU" in os.environ
 # Default: skip pip on local/CI to avoid proxy errors; enable in Colab or via TLC_SKIP_PIP=0
 env_skip = os.environ.get("TLC_SKIP_PIP")
 SKIP_PIP = (env_skip == "1") if env_skip is not None else (not IN_COLAB)
+# Networking/launch toggles (must be defined early for dependency checks)
+DEFAULT_OFFLINE_MODE = os.environ.get("TLC_OFFLINE_MODE", "1") == "1"
+SHARE_UI = os.environ.get("TLC_SHARE", "0") == "1"
 pkgs = [
     "gradio==4.44.1",
     "sentence-transformers==3.0.1",
@@ -27,8 +30,9 @@ def ensure_runtime_dependencies():
         "numpy": "numerical ops",
         "sklearn": "ML",
         "langdetect": "language detection",
-        "sentence_transformers": "semantic embeddings",
     }
+    if not DEFAULT_OFFLINE_MODE:
+        required_mods["sentence_transformers"] = "semantic embeddings"
     missing = [m for m in required_mods if importlib.util.find_spec(m) is None]
     if not missing:
         return
@@ -59,7 +63,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
 from sklearn.neighbors import NearestNeighbors
-from sentence_transformers import SentenceTransformer
 
 # ---------- 2) Config ----------
 ORG_NAME = "Toyota Learning Center (TLC) – TMMIN"
@@ -72,10 +75,6 @@ LOCATIONS = ["TLC Sunter 2 – Zenix 2", "TLC Karawang", "Online (MS Teams)", "O
 # Intent routing knobs — tweak to adjust how strict each layer is
 INTENT_CONFIDENCE_THRESHOLD = 0.5  # classifier must be at least this confident
 SEMANTIC_INTENT_THRESHOLD = 0.6    # semantic similarity must exceed this when classifier is uncertain
-
-# Networking/launch toggles
-DEFAULT_OFFLINE_MODE = os.environ.get("TLC_OFFLINE_MODE", "1") == "1"
-SHARE_UI = os.environ.get("TLC_SHARE", "0") == "1"
 
 # Conversational context helpers (keywords for lightweight rules)
 PRICING_KEYWORDS = ["harga", "biaya", "cost", "fee", "tarif"]
@@ -169,6 +168,7 @@ def build_embedder(corpus_texts):
     offline = DEFAULT_OFFLINE_MODE
     if not offline:
         try:
+            from sentence_transformers import SentenceTransformer
             model = SentenceTransformer(model_name, local_files_only=False)
 
             def _encode(texts, normalize_embeddings=True):
@@ -916,7 +916,11 @@ def main():
         msg.submit(chat_fn, inputs=[chat, msg, session_state, name, company, email, phone, interest],
                    outputs=[chat, session_state, msg])
 
-    demo.launch(debug=False, share=SHARE_UI)
+    # Gradio 4.x dapat memicu error serialisasi skema API pada lingkungan terbatas (mis. Colab)
+    # sehingga kita matikan dokumentasi API (show_api=False).
+    # Selain itu, Colab tidak mengizinkan akses langsung ke localhost sehingga share harus True.
+    share_flag = SHARE_UI or IN_COLAB
+    demo.launch(debug=False, share=share_flag, show_api=False)
 
 
 if __name__ == "__main__":
