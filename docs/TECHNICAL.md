@@ -2,7 +2,7 @@
 
 ## Overview
 This repository hosts two runnable chatbot entry points:
-- **`app.py`** – notebook-friendly/Colab style launcher with optional dependency bootstrapping guard (`TLC_SKIP_PIP`).
+- **`app.py`** – notebook-friendly/Colab style launcher with optional dependency bootstrapping guard (`TLC_SKIP_PIP`) and offline-friendly TF-IDF fallback when transformer weights are unavailable.
 - **`app2.py`** – local/runtime-oriented launcher that assumes dependencies are preinstalled.
 
 Both variants share the same core logic for intent detection, slot extraction, RAG search, conversational state, and handlers tuned for Toyota Learning Center (TLC) training workflows.
@@ -44,10 +44,15 @@ Key tuning knobs in both apps:
 - `PRICING_KEYWORDS` / external-training keywords drive context overrides.
 - Contact metadata (`ORG_NAME`, `CONTACT_EMAIL`, `WHATSAPP_LINK`) and quick replies live near the top of each app file.
 
+### Embedder & connectivity behavior
+- **Offline/TF-IDF mode**: If transformer weights are missing or `TLC_OFFLINE_MODE=1` is set, the embedder skips `sentence-transformers` and immediately uses the lightweight TF-IDF encoder. This keeps Colab runtimes fast and avoids extra downloads.
+- **Online/Sentence-Transformer mode**: When available, `sentence-transformers/all-MiniLM-L6-v2` is lazily loaded on first use. Set `TLC_FORCE_ONLINE=1` to require this path.
+- **Gradio share links**: In notebook contexts where `localhost` is blocked (e.g., Colab), set `TLC_SHARE=1` to automatically request a public Gradio share link during launch. This prevents `ValueError` about inaccessible localhost and reuses the generated link for re-runs.
+
 ## Running the apps
 1. Install dependencies from `requirements.txt` into a virtual environment.
 2. For local use, run `python app2.py` and open the provided Gradio URL.
-3. For notebook/Colab usage, set `TLC_SKIP_PIP=1` when importing to avoid bootstrapping; otherwise run `python app.py`.
+3. For notebook/Colab usage, set `TLC_SKIP_PIP=1` when importing to avoid bootstrapping; set `TLC_SHARE=1` to force a public link; otherwise run `python app.py`.
 
 ## Extensibility notes
 - Add intents by expanding training pairs, semantic profiles, and handler mappings in both app files.
